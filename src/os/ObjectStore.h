@@ -70,6 +70,7 @@ protected:
   string path;
 
 public:
+  CephContext* cct;
   /**
    * create - create an ObjectStore instance.
    *
@@ -98,8 +99,6 @@ public:
     const string& path,
     uuid_d *fsid);
 
-  Logger *logger;
-
   /**
    * Fetch Object Store statistics.
    *
@@ -108,6 +107,14 @@ public:
    * This appears to be called with nothing locked.
    */
   virtual objectstore_perf_stat_t get_cur_stats() = 0;
+
+  /**
+   * Fetch Object Store performance counters.
+   *
+   *
+   * This appears to be called with nothing locked.
+   */
+  virtual const PerfCounters* get_perf_counters() const = 0;
 
   /**
    * a sequencer orders transactions
@@ -126,6 +133,7 @@ public:
    * created in ...::queue_transaction(s)
    */
   struct Sequencer_impl : public RefCountedObject {
+    CephContext* cct;
     virtual void flush() = 0;
 
     /**
@@ -143,7 +151,7 @@ public:
       Context *c ///< [in] context to call upon flush/commit
       ) = 0; ///< @return true if idle, false otherwise
 
-    Sequencer_impl() : RefCountedObject(NULL, 0) {}
+    Sequencer_impl(CephContext* cct) : RefCountedObject(NULL, 0), cct(cct)  {}
     virtual ~Sequencer_impl() {}
   };
   typedef boost::intrusive_ptr<Sequencer_impl> Sequencer_implRef;
@@ -473,7 +481,7 @@ public:
     void *osr {nullptr}; // NULL on replay
 
     map<coll_t, __le32> coll_index;
-    map<ghobject_t, __le32, ghobject_t::BitwiseComparator> object_index;
+    map<ghobject_t, __le32> object_index;
 
     __le32 coll_id {0};
     __le32 object_id {0};
@@ -690,6 +698,7 @@ public:
         op->cid = cm[op->cid];
         op->oid = om[op->oid];
         op->dest_oid = om[op->dest_oid];
+	break;
 
       case OP_SPLIT_COLLECTION2:
         assert(op->cid < cm.size());
@@ -745,7 +754,7 @@ public:
       }
 
       vector<__le32> om(other.object_index.size());
-      map<ghobject_t, __le32, ghobject_t::BitwiseComparator>::iterator object_index_p;
+      map<ghobject_t, __le32>::iterator object_index_p;
       for (object_index_p = other.object_index.begin();
            object_index_p != other.object_index.end();
            ++object_index_p) {
@@ -891,7 +900,7 @@ public:
           colls[coll_index_p->second] = coll_index_p->first;
         }
 
-        map<ghobject_t, __le32, ghobject_t::BitwiseComparator>::iterator object_index_p;
+        map<ghobject_t, __le32>::iterator object_index_p;
         for (object_index_p = t->object_index.begin();
              object_index_p != t->object_index.end();
              ++object_index_p) {
@@ -993,7 +1002,7 @@ private:
       return index_id;
     }
     __le32 _get_object_id(const ghobject_t& oid) {
-      map<ghobject_t, __le32, ghobject_t::BitwiseComparator>::iterator o = object_index.find(oid);
+      map<ghobject_t, __le32>::iterator o = object_index.find(oid);
       if (o != object_index.end())
         return o->second;
 
@@ -1155,7 +1164,8 @@ public:
      * The destination named object may already exist, in
      * which case its previous contents are discarded.
      */
-    void clone(const coll_t& cid, const ghobject_t& oid, ghobject_t noid) {
+    void clone(const coll_t& cid, const ghobject_t& oid,
+	       const ghobject_t& noid) {
       Op* _op = _get_next_op();
       _op->op = OP_CLONE;
       _op->cid = _get_coll_id(cid);
@@ -1175,7 +1185,8 @@ public:
      * The source range *must* overlap with the source object data. If it does
      * not the result is undefined.
      */
-    void clone_range(const coll_t& cid, const ghobject_t& oid, ghobject_t noid,
+    void clone_range(const coll_t& cid, const ghobject_t& oid,
+		     const ghobject_t& noid,
 		     uint64_t srcoff, uint64_t srclen, uint64_t dstoff) {
       Op* _op = _get_next_op();
       _op->op = OP_CLONERANGE2;
@@ -1481,17 +1492,22 @@ public:
   }
 
  public:
-  explicit ObjectStore(const std::string& path_) : path(path_), logger(NULL) {}
+  ObjectStore(CephContext* cct,
+	      const std::string& path_) : path(path_), cct(cct) {}
   virtual ~ObjectStore() {}
 
   // no copying
-  explicit ObjectStore(const ObjectStore& o);
-  const ObjectStore& operator=(const ObjectStore& o);
+  explicit ObjectStore(const ObjectStore& o) = delete;
+  const ObjectStore& operator=(const ObjectStore& o) = delete;
 
   // versioning
   virtual int upgrade() {
     return 0;
   }
+
+  virtual void get_db_statistics(Formatter *f) { }
+  virtual void generate_db_histogram(Formatter *f) { }
+  virtual void dump_perf_counters(Formatter *f) {}
 
   virtual string get_type() = 0;
 
@@ -1822,21 +1838,21 @@ public:
    * @param c collection
    * @param start list object that sort >= this value
    * @param end list objects that sort < this value
-   * @param sort_bitwise sort bitwise (instead of legacy nibblewise)
    * @param max return no more than this many results
    * @param seq return no objects with snap < seq
    * @param ls [out] result
    * @param next [out] next item sorts >= this value
    * @return zero on success, or negative error
    */
-  virtual int collection_list(const coll_t& c, ghobject_t start, ghobject_t end,
-			      bool sort_bitwise, int max,
+  virtual int collection_list(const coll_t& c,
+			      const ghobject_t& start, const ghobject_t& end,
+			      int max,
 			      vector<ghobject_t> *ls, ghobject_t *next) = 0;
   virtual int collection_list(CollectionHandle &c,
-			      ghobject_t start, ghobject_t end,
-			      bool sort_bitwise, int max,
+			      const ghobject_t& start, const ghobject_t& end,
+			      int max,
 			      vector<ghobject_t> *ls, ghobject_t *next) {
-    return collection_list(c->get_cid(), start, end, sort_bitwise, max, ls, next);
+    return collection_list(c->get_cid(), start, end, max, ls, next);
   }
 
 

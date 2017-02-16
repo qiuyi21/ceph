@@ -265,12 +265,37 @@ TEST(mempool, unordered_map)
   h[2] = obj(1);
 }
 
+TEST(mempool, bufferlist)
+{
+  bufferlist bl;
+  int len = 1048576;
+  size_t before = mempool::buffer_data::allocated_bytes();
+  cout << "before " << before << std::endl;
+  bl.append(buffer::create_aligned(len, 4096));
+  size_t after = mempool::buffer_data::allocated_bytes();
+  cout << "after " << after << std::endl;
+  ASSERT_GE(after, before + len);
+}
+
+TEST(mempool, string_test)
+{
+  mempool::unittest_2::string s;
+  s.reserve(100);
+  EXPECT_GE(mempool::unittest_2::allocated_items(), s.capacity() + 1u); // +1 for zero-byte termination :
+  for (size_t i = 0; i < 10; ++i) {
+    s += '1';
+    s.append(s);
+    EXPECT_GE(mempool::unittest_2::allocated_items(), s.capacity() + 1u);
+  }
+}
+
 int main(int argc, char **argv)
 {
   vector<const char*> args;
   argv_to_vec(argc, (const char **)argv, args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
 
   // enable debug mode for the tests

@@ -4,15 +4,13 @@
 #include <set>
 #include <boost/scoped_ptr.hpp>
 #include <sys/types.h>
+#include <cstdlib>
 
 #include "include/buffer.h"
 #include "common/map_cacher.hpp"
 #include "osd/SnapMapper.h"
-#include "global/global_init.h"
-#include "common/ceph_argparse.h"
 
 #include "gtest/gtest.h"
-#include "stdlib.h"
 
 using namespace std;
 
@@ -440,8 +438,8 @@ TEST_F(MapCacherTest, Random)
 class MapperVerifier {
   PausyAsyncMap *driver;
   boost::scoped_ptr< SnapMapper > mapper;
-  map<snapid_t, set<hobject_t, hobject_t::BitwiseComparator> > snap_to_hobject;
-  map<hobject_t, set<snapid_t>, hobject_t::BitwiseComparator> hobject_to_snap;
+  map<snapid_t, set<hobject_t> > snap_to_hobject;
+  map<hobject_t, set<snapid_t>> hobject_to_snap;
   snapid_t next;
   uint32_t mask;
   uint32_t bits;
@@ -453,7 +451,7 @@ public:
     uint32_t mask,
     uint32_t bits)
     : driver(driver),
-      mapper(new SnapMapper(driver, mask, bits, 0, shard_id_t(1))),
+      mapper(new SnapMapper(g_ceph_context, driver, mask, bits, 0, shard_id_t(1))),
              mask(mask), bits(bits),
       lock("lock") {}
 
@@ -493,7 +491,7 @@ public:
     for (set<snapid_t>::iterator i = snaps.begin();
 	 i != snaps.end();
 	 ++i) {
-      map<snapid_t, set<hobject_t, hobject_t::BitwiseComparator> >::iterator j = snap_to_hobject.find(*i);
+      map<snapid_t, set<hobject_t> >::iterator j = snap_to_hobject.find(*i);
       assert(j != snap_to_hobject.end());
       j->second.insert(obj);
     }
@@ -508,9 +506,9 @@ public:
     Mutex::Locker l(lock);
     if (snap_to_hobject.empty())
       return;
-    map<snapid_t, set<hobject_t, hobject_t::BitwiseComparator> >::iterator snap =
+    map<snapid_t, set<hobject_t> >::iterator snap =
       rand_choose(snap_to_hobject);
-    set<hobject_t, hobject_t::BitwiseComparator> hobjects = snap->second;
+    set<hobject_t> hobjects = snap->second;
 
     vector<hobject_t> hoids;
     while (mapper->get_next_objects_to_trim(
@@ -520,7 +518,7 @@ public:
 	assert(hobjects.count(hoid));
 	hobjects.erase(hoid);
 
-	map<hobject_t, set<snapid_t>, hobject_t::BitwiseComparator>::iterator j =
+	map<hobject_t, set<snapid_t>>::iterator j =
 	  hobject_to_snap.find(hoid);
 	assert(j->second.count(snap->first));
 	set<snapid_t> old_snaps(j->second);
@@ -550,12 +548,12 @@ public:
     Mutex::Locker l(lock);
     if (hobject_to_snap.empty())
       return;
-    map<hobject_t, set<snapid_t>, hobject_t::BitwiseComparator>::iterator obj =
+    map<hobject_t, set<snapid_t>>::iterator obj =
       rand_choose(hobject_to_snap);
     for (set<snapid_t>::iterator i = obj->second.begin();
 	 i != obj->second.end();
 	 ++i) {
-      map<snapid_t, set<hobject_t, hobject_t::BitwiseComparator> >::iterator j =
+      map<snapid_t, set<hobject_t> >::iterator j =
 	snap_to_hobject.find(*i);
       assert(j->second.count(obj->first));
       j->second.erase(obj->first);
@@ -574,7 +572,7 @@ public:
     Mutex::Locker l(lock);
     if (hobject_to_snap.empty())
       return;
-    map<hobject_t, set<snapid_t>, hobject_t::BitwiseComparator>::iterator obj =
+    map<hobject_t, set<snapid_t>>::iterator obj =
       rand_choose(hobject_to_snap);
     set<snapid_t> snaps;
     int r = mapper->get_snaps(obj->first, &snaps);
@@ -659,15 +657,4 @@ TEST_F(SnapMapperTest, More) {
 TEST_F(SnapMapperTest, MultiPG) {
   init(50);
   run();
-}
-
-int main(int argc, char **argv)
-{
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
 }

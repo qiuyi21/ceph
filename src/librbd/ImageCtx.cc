@@ -73,7 +73,7 @@ public:
         lock("librbd::Journal::SafeTimerSingleton::lock") {
     init();
   }
-  virtual ~SafeTimerSingleton() {
+  ~SafeTimerSingleton() {
     Mutex::Locker locker(lock);
     shutdown();
   }
@@ -138,7 +138,9 @@ struct C_InvalidateCache : public Context {
     } else {
       lderr(cct) << "could not release all objects from cache: "
                  << unclean << " bytes remain" << dendl;
-      r = -EBUSY;
+      if (r == 0) {
+        r = -EBUSY;
+      }
     }
 
     if (reentrant_safe) {
@@ -543,12 +545,12 @@ struct C_InvalidateCache : public Context {
 			  cls::rbd::SnapshotNamespace in_snap_namespace,
 			  snap_t id, uint64_t in_size,
 			  parent_info parent, uint8_t protection_status,
-                          uint64_t flags)
+                          uint64_t flags, utime_t timestamp)
   {
     assert(snap_lock.is_wlocked());
     snaps.push_back(id);
     SnapInfo info(in_snap_name, in_snap_namespace,
-		  in_size, parent, protection_status, flags);
+		  in_size, parent, protection_status, flags, timestamp);
     snap_info.insert(pair<snap_t, SnapInfo>(id, info));
     snap_ids.insert(pair<string, snap_t>(in_snap_name, id));
   }
@@ -789,7 +791,7 @@ struct C_InvalidateCache : public Context {
     return result;
   }
 
-  void ImageCtx::invalidate_cache(Context *on_finish) {
+  void ImageCtx::invalidate_cache(bool purge_on_error, Context *on_finish) {
     if (object_cacher == NULL) {
       op_work_queue->queue(on_finish, 0);
       return;
@@ -799,7 +801,7 @@ struct C_InvalidateCache : public Context {
     object_cacher->release_set(object_set);
     cache_lock.Unlock();
 
-    flush_cache(new C_InvalidateCache(this, false, false, on_finish));
+    flush_cache(new C_InvalidateCache(this, purge_on_error, false, on_finish));
   }
 
   void ImageCtx::clear_nonexistence_cache() {
@@ -807,6 +809,11 @@ struct C_InvalidateCache : public Context {
     if (!object_cacher)
       return;
     object_cacher->clear_nonexistence(object_set);
+  }
+
+  bool ImageCtx::is_cache_empty() {
+    Mutex::Locker locker(cache_lock);
+    return object_cacher->set_is_empty(object_set);
   }
 
   void ImageCtx::register_watch(Context *on_finish) {
@@ -910,7 +917,6 @@ struct C_InvalidateCache : public Context {
                                         map<string, bufferlist> *res) {
     size_t conf_prefix_len = prefix.size();
 
-    string start = prefix;
     for (auto it : pairs) {
       if (it.first.compare(0, MIN(conf_prefix_len, it.first.size()), prefix) > 0)
         return false;
@@ -961,7 +967,8 @@ struct C_InvalidateCache : public Context {
         "rbd_journal_pool", false)(
         "rbd_journal_max_payload_bytes", false)(
         "rbd_journal_max_concurrent_object_sets", false)(
-        "rbd_mirroring_resync_after_disconnect", false);
+        "rbd_mirroring_resync_after_disconnect", false)(
+        "rbd_mirroring_replay_delay", false);
 
     md_config_t local_config_t;
     std::map<std::string, bufferlist> res;
@@ -1019,14 +1026,15 @@ struct C_InvalidateCache : public Context {
     ASSIGN_OPTION(journal_max_payload_bytes);
     ASSIGN_OPTION(journal_max_concurrent_object_sets);
     ASSIGN_OPTION(mirroring_resync_after_disconnect);
+    ASSIGN_OPTION(mirroring_replay_delay);
   }
 
   ExclusiveLock<ImageCtx> *ImageCtx::create_exclusive_lock() {
     return new ExclusiveLock<ImageCtx>(*this);
   }
 
-  ObjectMap *ImageCtx::create_object_map(uint64_t snap_id) {
-    return new ObjectMap(*this, snap_id);
+  ObjectMap<ImageCtx> *ImageCtx::create_object_map(uint64_t snap_id) {
+    return new ObjectMap<ImageCtx>(*this, snap_id);
   }
 
   Journal<ImageCtx> *ImageCtx::create_journal() {

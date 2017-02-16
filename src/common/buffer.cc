@@ -27,6 +27,7 @@
 #include "include/types.h"
 #include "include/compat.h"
 #include "include/inline_memory.h"
+#include "include/scope_guard.h"
 #if defined(HAVE_XIO)
 #include "msg/xio/XioMsg.h"
 #endif
@@ -349,14 +350,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
     raw_posix_aligned(unsigned l, unsigned _align) : raw(l) {
       align = _align;
       assert((align >= sizeof(void *)) && (align & (align - 1)) == 0);
-#ifdef DARWIN
-      data = (char *) valloc (len);
-#else
-      data = 0;
-      int r = ::posix_memalign((void**)(void*)&data, align, len);
-      if (r)
-	throw bad_alloc();
-#endif /* DARWIN */
+      data = mempool::buffer_data::alloc_char.allocate_aligned(len, align);
       if (!data)
 	throw bad_alloc();
       inc_total_alloc(len);
@@ -364,7 +358,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
       bdout << "raw_posix_aligned " << this << " alloc " << (void *)data << " l=" << l << ", align=" << align << " total_alloc=" << buffer::get_total_alloc() << bendl;
     }
     ~raw_posix_aligned() {
-      ::free((void*)data);
+      mempool::buffer_data::alloc_char.deallocate_aligned(data, len);
       dec_total_alloc(len);
       bdout << "raw_posix_aligned " << this << " free " << (void *)data << " " << buffer::get_total_alloc() << bendl;
     }
@@ -521,7 +515,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
       return 0;
     }
 
-    void close_pipe(int *fds) {
+    static void close_pipe(const int *fds) {
       if (fds[0] >= 0)
 	VOID_TEMP_FAILURE_RETRY(::close(fds[0]));
       if (fds[1] >= 0)
@@ -543,6 +537,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 	      << bendl;
 	throw error_code(r);
       }
+      auto sg = make_scope_guard([=] { close_pipe(tmpfd); });	  
       r = set_nonblocking(tmpfd);
       if (r < 0) {
 	bdout << "raw_pipe: error setting nonblocking flag on temp pipe: "
@@ -559,12 +554,10 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 	r = errno;
 	bdout << "raw_pipe: error tee'ing into temp pipe: " << cpp_strerror(r)
 	      << bendl;
-	close_pipe(tmpfd);
 	throw error_code(r);
       }
       data = (char *)malloc(len);
       if (!data) {
-	close_pipe(tmpfd);
 	throw bad_alloc();
       }
       r = safe_read(tmpfd[0], data, len);
@@ -573,10 +566,8 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
 	      << bendl;
 	free(data);
 	data = NULL;
-	close_pipe(tmpfd);
 	throw error_code(r);
       }
-      close_pipe(tmpfd);
       return data;
     }
     bool source_consumed;
@@ -1176,6 +1167,12 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
   }
 
   template<bool is_const>
+  void buffer::list::iterator_impl<is_const>::copy(unsigned len, ptr &dest)
+  {
+    copy_deep(len, dest);
+  }
+
+  template<bool is_const>
   void buffer::list::iterator_impl<is_const>::copy_deep(unsigned len, ptr &dest)
   {
     if (!len) {
@@ -1348,6 +1345,11 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
   void buffer::list::iterator::copy(unsigned len, char *dest)
   {
     return buffer::list::iterator_impl<false>::copy(len, dest);
+  }
+
+  void buffer::list::iterator::copy(unsigned len, ptr &dest)
+  {
+    return buffer::list::iterator_impl<false>::copy_deep(len, dest);
   }
 
   void buffer::list::iterator::copy_deep(unsigned len, ptr &dest)
@@ -1791,7 +1793,7 @@ static simple_spinlock_t buffer_debug_lock = SIMPLE_SPINLOCK_INITIALIZER;
         if (gap > len) gap = len;
     //cout << "append first char is " << data[0] << ", last char is " << data[len-1] << std::endl;
         append_buffer.append(data, gap);
-        append(append_buffer, append_buffer.end() - gap, gap);	// add segment to the list
+        append(append_buffer, append_buffer.length() - gap, gap);	// add segment to the list
         len -= gap;
         data += gap;
       }

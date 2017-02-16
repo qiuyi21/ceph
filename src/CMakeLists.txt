@@ -5,6 +5,12 @@ include(GNUInstallDirs)
 # for erasure and compressor plugins
 set(CMAKE_INSTALL_PKGLIBDIR ${CMAKE_INSTALL_LIBDIR}/${PROJECT_NAME})
 set(CMAKE_INSTALL_FULL_PKGLIBDIR ${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME})
+# so libceph-common can be found
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+if(NOT CMAKE_INSTALL_RPATH)
+  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_FULL_PKGLIBDIR}")
+endif()
+
 # to be compatible with configure_files shared with autoconfig
 set(bindir ${CMAKE_INSTALL_FULL_BINDIR})
 set(sbindir ${CMAKE_INSTALL_FULL_SBINDIR})
@@ -123,18 +129,29 @@ endif(no_yasm)
 if(CMAKE_VERSION VERSION_LESS "3.1")
   include(CheckCXXCompilerFlag)
   CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-  if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-  else()
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support.")
+  if(NOT COMPILER_SUPPORTS_CXX11)
+    message(FATAL_ERROR
+      "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support.")
   endif()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+  include(CheckCCompilerFlag)
+  CHECK_C_COMPILER_FLAG("-std=gnu99" COMPILER_SUPPORTS_GNU99)
+  if(NOT COMPILER_SUPPORTS_GNU99)
+    message(FATAL_ERROR
+      "The compiler ${CMAKE_C_COMPILER} has no GNU C99 support.")
+  endif()
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99")
 else()
   set(CMAKE_CXX_STANDARD 11)
   set(CMAKE_CXX_EXTENSIONS OFF)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(CMAKE_C_STANDARD 99)
+  # we use `asm()` to inline assembly, so enable the GNU extension
+  set(CMAKE_C_EXTENSIONS ON)
+  set(C_STANDARD_REQUIRED ON)
 endif()
 
 ## Handle diagnostics color if compiler supports them.
-
 CHECK_C_COMPILER_FLAG("-fdiagnostics-color=always"
   COMPILER_SUPPORTS_DIAGNOSTICS_COLOR)
 
@@ -253,7 +270,7 @@ elseif(ALLOCATOR STREQUAL "tcmalloc_minimal")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
   set(TCMALLOC_srcs perfglue/disabled_heap_profiler.cc)
 elseif(ALLOCATOR STREQUAL "jemalloc")
-  set(ALLOC_LIBS ${JEMALLOC_LIBRARY})
+  set(ALLOC_LIBS ${JEMALLOC_LIBRARIES})
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
   set(TCMALLOC_srcs perfglue/disabled_heap_profiler.cc)
 elseif(ALLOCATOR STREQUAL "libc")
@@ -375,6 +392,7 @@ set(libcommon_files
   common/PrebufferedStreambuf.cc
   common/BackTrace.cc
   common/perf_counters.cc
+  common/perf_histogram.cc
   common/mutex_debug.cc
   common/Mutex.cc
   common/OutputDataSocket.cc
@@ -413,8 +431,6 @@ set(libcommon_files
   common/TrackedOp.cc
   common/SloppyCRCMap.cc
   common/types.cc
-  $<TARGET_OBJECTS:common_buffer_obj>
-  $<TARGET_OBJECTS:common_texttable_obj>
   log/Log.cc
   log/SubsystemMap.cc
   mon/MonCap.cc
@@ -446,6 +462,7 @@ set(libcommon_files
   osd/OSDMap.cc
   common/histogram.cc
   osd/osd_types.cc
+  osd/OpRequest.cc
   common/blkdev.cc
   common/common_init.cc
   common/pipe.c
@@ -465,6 +482,7 @@ set(libcommon_files
   common/ceph_strings.cc
   common/ceph_frag.cc
   common/config.cc
+  common/config_validators.cc
   common/utf8.c
   common/mime.c
   common/strtol.cc
@@ -491,7 +509,6 @@ set(libcommon_files
   common/dns_resolve.cc
   ${arch_files}
   ${auth_files}
-  $<TARGET_OBJECTS:compressor_objs>
   ${mds_files})
 if(LINUX)
   list(APPEND libcommon_files msg/async/EventEpoll.cc)
@@ -500,6 +517,12 @@ elseif(FREEBSD OR APPLE)
   list(APPEND libcommon_files msg/async/EventKqueue.cc)
   message(STATUS " Using EventKqueue for events.")
 endif(LINUX)
+
+if(WITH_LTTNG AND WITH_EVENTTRACE)
+  message(STATUS " Using EventTrace class.")
+  add_definitions("-DWITH_EVENTTRACE")
+  list(APPEND libcommon_files common/EventTrace.cc)
+endif()
 
 set(mon_common_files
   auth/AuthSessionHandler.cc
@@ -522,17 +545,31 @@ else()
     perfglue/disabled_stubs.cc)
 endif()
 
-if(ENABLE_SHARED)
-  list(APPEND libcommon_files
-    $<TARGET_OBJECTS:global_common_objs>)
-endif(ENABLE_SHARED)
-
-add_library(common STATIC ${libcommon_files}
-  $<TARGET_OBJECTS:mon_common_objs>
-  $<TARGET_OBJECTS:common_mountcephfs_objs>)
-target_link_libraries(common json_spirit erasure_code rt ${LIB_RESOLV}
-  ${Boost_LIBRARIES} ${BLKID_LIBRARIES} ${Backtrace_LIBRARIES}
+add_library(common-objs OBJECT ${libcommon_files})
+set(ceph_common_objs
+  $<TARGET_OBJECTS:common_buffer_obj>
+  $<TARGET_OBJECTS:common_texttable_obj>
+  $<TARGET_OBJECTS:compressor_objs>
+  $<TARGET_OBJECTS:common-objs>
+  $<TARGET_OBJECTS:common_mountcephfs_objs>
+  $<TARGET_OBJECTS:global_common_objs>)
+set(ceph_common_deps
+  json_spirit erasure_code rt ${LIB_RESOLV}
+  ${Boost_THREAD_LIBRARY}
+  ${Boost_SYSTEM_LIBRARY}
+  ${Boost_REGEX_LIBRARY}
+  ${Boost_RANDOM_LIBRARY}
+  ${Boost_PROGRAM_OPTIONS_LIBRARY}
+  ${Boost_DATE_TIME_LIBRARY}
+  ${Boost_IOSTREAMS_LIBRARY}
+  ${BLKID_LIBRARIES} ${Backtrace_LIBRARIES}
   ${CRYPTO_LIBS} ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
+if(HAVE_RDMA)
+  list(APPEND ceph_common_deps ${RDMA_LIBRARY})
+endif()
+if(NOT WITH_SYSTEM_BOOST)
+  list(APPEND ceph_common_deps ${ZLIB_LIBRARIES})
+endif()
 
 set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ceph_ver.c
   ${CMAKE_SOURCE_DIR}/src/common/version.cc
@@ -542,13 +579,25 @@ set_source_files_properties(${CMAKE_SOURCE_DIR}/src/ceph_ver.c
 include(SIMDExt)
 if(HAVE_ARMV8_CRC)
   add_library(common_crc_aarch64 STATIC common/crc32c_aarch64.c)
-  target_link_libraries(common common_crc_aarch64)
+  list(APPEND ceph_common_deps common_crc_aarch64)
 endif(HAVE_ARMV8_CRC)
+
+add_library(common STATIC ${ceph_common_objs})
+target_link_libraries(common ${ceph_common_deps})
+
+add_library(ceph-common SHARED ${ceph_common_objs})
+target_link_libraries(ceph-common ${ceph_common_deps})
+# appease dpkg-shlibdeps
+set_target_properties(ceph-common PROPERTIES
+  SOVERSION 0
+  INSTALL_RPATH "")
+install(TARGETS ceph-common DESTINATION ${CMAKE_INSTALL_PKGLIBDIR})
 
 add_library(common_utf8 STATIC common/utf8.c)
 
 if(${WITH_LTTNG})
   add_subdirectory(tracing)
+  add_dependencies(common-objs oprequest-tp)
 endif(${WITH_LTTNG})
 
 add_subdirectory(global)
@@ -583,8 +632,8 @@ if (WITH_MGR)
   add_executable(ceph-mgr ${mgr_srcs}
                  $<TARGET_OBJECTS:heap_profiler_objs>)
   target_include_directories(ceph-mgr PRIVATE "${PYTHON_INCLUDE_DIRS}")
-  target_link_libraries(ceph-mgr mds osdc global
-      -lboost_python ${PYTHON_LIBRARIES} ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${ALLOC_LIBS})
+  target_link_libraries(ceph-mgr mds osdc global-static common
+      ${Boost_PYTHON_LIBRARY} ${PYTHON_LIBRARIES} ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${ALLOC_LIBS})
   install(TARGETS ceph-mgr DESTINATION bin)
 endif (WITH_MGR)
 
@@ -628,17 +677,16 @@ if(${WITH_RADOSGW})
 endif(${WITH_RADOSGW})
 if(WITH_RBD)
   set(DENCODER_EXTRALIBS
-      ${DENCODER_EXTRALIBS}
-      rbd_replay_types)
-  if(LINUX)
-    list(APPEND dencoder_srcs
-      $<TARGET_OBJECTS:krbd_objs>
-      $<TARGET_OBJECTS:parse_secret_objs>)
+    ${DENCODER_EXTRALIBS}
+    cls_rbd_client
+    rbd_mirror_types
+    rbd_types
+    rbd_replay_types)
+  if(WITH_KRBD)
     set(DENCODER_EXTRALIBS
       ${DENCODER_EXTRALIBS}
-      keyutils
-      udev)
-  endif(LINUX)
+      krbd)
+  endif()
 endif(WITH_RBD)
 
 add_executable(ceph-dencoder ${dencoder_srcs})
@@ -675,51 +723,60 @@ set(ceph_mon_srcs
 add_executable(ceph-mon ${ceph_mon_srcs}
   $<TARGET_OBJECTS:common_texttable_obj>)
 add_dependencies(ceph-mon erasure_code_plugins)
-      target_link_libraries(ceph-mon mon common os global ${EXTRALIBS}
+target_link_libraries(ceph-mon mon common os global-static common
+  ${EXTRALIBS}
   ${CMAKE_DL_LIBS})
 install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD/ObjectStore
 # make rocksdb statically
 
-set(ROCKSDB_CMAKE_ARGS -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
+if (NOT WITH_SYSTEM_ROCKSDB)
+  set(ROCKSDB_CMAKE_ARGS -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
 
-if(ALLOCATOR STREQUAL "jemalloc")
-  list(APPEND ROCKSDB_CMAKE_ARGS -DWITH_JEMALLOC=ON)
-endif()
+  if(ALLOCATOR STREQUAL "jemalloc")
+    list(APPEND ROCKSDB_CMAKE_ARGS -DWITH_JEMALLOC=ON)
+  endif()
 
-if (WITH_CCACHE AND CCACHE_FOUND)
-  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=ccache)
-  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER_ARG1=${CMAKE_CXX_COMPILER})
-else(WITH_CCACHE AND CCACHE_FOUND)
-  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
-endif(WITH_CCACHE AND CCACHE_FOUND)
+  if (WITH_CCACHE AND CCACHE_FOUND)
+    list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=ccache)
+    list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER_ARG1=${CMAKE_CXX_COMPILER})
+  else(WITH_CCACHE AND CCACHE_FOUND)
+    list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
+  endif(WITH_CCACHE AND CCACHE_FOUND)
 
-list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_AR=${CMAKE_AR})
-list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_AR=${CMAKE_AR})
+  list(APPEND ROCKSDB_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
 
-# we use an external project and copy the sources to bin directory to ensure
-# that object files are built outside of the source tree.
-include(ExternalProject)
-ExternalProject_Add(rocksdb_ext
-  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb
-  CMAKE_ARGS ${ROCKSDB_CMAKE_ARGS}
-  BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/rocksdb
-  BUILD_COMMAND $(MAKE) rocksdblib
-  INSTALL_COMMAND "true")
+  if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+    list(APPEND ROCKSDB_CMAKE_ARGS -DFAIL_ON_WARNINGS=OFF)
+  endif()
 
-# force rocksdb make to be called on each time
-ExternalProject_Add_Step(rocksdb_ext forcebuild
-  DEPENDEES configure
-  DEPENDERS build
-  COMMAND "true"
-  ALWAYS 1)
+  # we use an external project and copy the sources to bin directory to ensure
+  # that object files are built outside of the source tree.
+  include(ExternalProject)
+  ExternalProject_Add(rocksdb_ext
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb
+    CMAKE_ARGS ${ROCKSDB_CMAKE_ARGS}
+    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/rocksdb
+    BUILD_COMMAND $(MAKE) rocksdb
+    INSTALL_COMMAND "true")
 
-set(ROCKSDB_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb/include)
+  # force rocksdb make to be called on each time
+  ExternalProject_Add_Step(rocksdb_ext forcebuild
+    DEPENDEES configure
+    DEPENDERS build
+    COMMAND "true"
+    ALWAYS 1)
 
-add_library(rocksdb STATIC IMPORTED)
-add_dependencies(rocksdb rocksdb_ext)
-set_property(TARGET rocksdb PROPERTY IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/rocksdb/librocksdblib.a")
+  set(ROCKSDB_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rocksdb/include)
+
+  add_library(rocksdb STATIC IMPORTED)
+  add_dependencies(rocksdb rocksdb_ext)
+  set_property(TARGET rocksdb PROPERTY IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/rocksdb/librocksdb.a")
+  set(ROCKSDB_LIBRARIES rocksdb)
+
+endif(NOT WITH_SYSTEM_ROCKSDB)
 
 add_subdirectory(kv)
 add_subdirectory(os)
@@ -733,7 +790,8 @@ set(ceph_osd_srcs
 add_executable(ceph-osd ${ceph_osd_srcs}
   $<TARGET_OBJECTS:common_util_obj>)
 add_dependencies(ceph-osd erasure_code_plugins)
-target_link_libraries(ceph-osd osd os global ${BLKID_LIBRARIES} ${RDMA_LIBRARIES})
+target_link_libraries(ceph-osd osd os global-static common
+  ${BLKID_LIBRARIES} ${RDMA_LIBRARIES})
 if(WITH_FUSE)
   target_link_libraries(ceph-osd ${FUSE_LIBRARIES})
 endif()
@@ -744,7 +802,7 @@ set(ceph_mds_srcs
   ceph_mds.cc)
 add_executable(ceph-mds ${ceph_mds_srcs}
   $<TARGET_OBJECTS:common_util_obj>)
-target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global
+target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global-static common
   ${Boost_THREAD_LIBRARY})
 install(TARGETS ceph-mds DESTINATION bin)
 
@@ -818,7 +876,7 @@ install(PROGRAMS
 
 add_subdirectory(bash_completion)
 
-if(KEYUTILS_FOUND)
+if(WITH_LIBCEPHFS OR WITH_KRBD)
   set(parse_secret_files
     common/secret.c)
   add_library(parse_secret_objs OBJECT ${parse_secret_files})
@@ -828,10 +886,10 @@ if(WITH_LIBCEPHFS)
   add_subdirectory(client)
   set(libcephfs_srcs libcephfs.cc)
   add_library(cephfs ${CEPH_SHARED} ${libcephfs_srcs})
-  target_link_libraries(cephfs LINK_PRIVATE client
+  target_link_libraries(cephfs LINK_PRIVATE client ceph-common
     ${CRYPTO_LIBS} ${EXTRALIBS})
   if(ENABLE_SHARED)
-    foreach(name common client osdc)
+    foreach(name ceph-common client osdc)
       set(CEPHFS_LINK_FLAGS "${CEPHFS_LINK_FLAGS} -Wl,--exclude-libs,lib${name}.a")
     endforeach()
     set_target_properties(cephfs PROPERTIES
@@ -848,14 +906,16 @@ if(WITH_LIBCEPHFS)
     ceph_syn.cc
     client/SyntheticClient.cc)
   add_executable(ceph-syn ${ceph_syn_srcs})
-  target_link_libraries(ceph-syn client global)
+  target_link_libraries(ceph-syn client global-static common)
 
   set(mount_ceph_srcs
     mount/mount.ceph.c)
   add_executable(mount.ceph ${mount_ceph_srcs}
     $<TARGET_OBJECTS:parse_secret_objs>
     $<TARGET_OBJECTS:common_mountcephfs_objs>)
-  target_link_libraries(mount.ceph keyutils)
+  set_target_properties(mount.ceph PROPERTIES
+    INSTALL_RPATH "")
+  target_link_libraries(mount.ceph ${KEYUTILS_LIBRARIES})
 
   install(TARGETS ceph-syn DESTINATION bin)
   install(TARGETS mount.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
@@ -865,7 +925,8 @@ if(WITH_LIBCEPHFS)
       ceph_fuse.cc
       client/fuse_ll.cc)
     add_executable(ceph-fuse ${ceph_fuse_srcs})
-    target_link_libraries(ceph-fuse ${ALLOC_LIBS} ${FUSE_LIBRARIES} client global)
+    target_link_libraries(ceph-fuse ${ALLOC_LIBS} ${FUSE_LIBRARIES}
+      client common global-static)
     set_target_properties(ceph-fuse PROPERTIES COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}")
     install(TARGETS ceph-fuse DESTINATION bin)
     install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
@@ -874,11 +935,12 @@ endif(WITH_LIBCEPHFS)
 
 add_subdirectory(journal)
 
-if(LINUX)
-  add_library(krbd_objs OBJECT krbd.cc)
-endif()
-
-if(${WITH_RBD})
+if(WITH_RBD)
+  if(WITH_KRBD)
+    add_library(krbd STATIC krbd.cc
+      $<TARGET_OBJECTS:parse_secret_objs>)
+    target_link_libraries(krbd ${KEYUTILS_LIBRARIES} ${UDEV_LIBRARIES})
+  endif()
   add_subdirectory(librbd)
   if(WITH_FUSE)
     add_subdirectory(rbd_fuse)
@@ -890,7 +952,7 @@ if(${WITH_RBD})
     ${CMAKE_SOURCE_DIR}/src/rbdmap
     DESTINATION ${CMAKE_INSTALL_BINDIR})
   add_subdirectory(rbd_replay)
-endif(${WITH_RBD})
+endif(WITH_RBD)
 
 # RadosGW
 if(WITH_KVS)
@@ -900,17 +962,25 @@ endif(WITH_KVS)
 if(WITH_RADOSGW)
   set(civetweb_common_files civetweb/src/civetweb.c)
   add_library(civetweb_common_objs OBJECT ${civetweb_common_files})
-  target_include_directories(civetweb_common_objs PUBLIC
+  target_include_directories(civetweb_common_objs PRIVATE
 	"${CMAKE_SOURCE_DIR}/src/civetweb/include")
   set_property(TARGET civetweb_common_objs
     APPEND PROPERTY COMPILE_DEFINITIONS USE_IPV6=1)
-  if(HAVE_SSL)
+  if(USE_OPENSSL)
     set_property(TARGET civetweb_common_objs
       APPEND PROPERTY COMPILE_DEFINITIONS NO_SSL_DL=1)
-    target_include_directories(civetweb_common_objs PUBLIC
+    target_include_directories(civetweb_common_objs PRIVATE
       "${SSL_INCLUDE_DIR}")
-  endif(HAVE_SSL)
+  endif(USE_OPENSSL)
+  if (LIBSSL_SONAME)
+    set_property(TARGET civetweb_common_objs
+      APPEND PROPERTY COMPILE_DEFINITIONS SSL_LIB="${LIBSSL_SONAME}")
+    set_property(TARGET civetweb_common_objs
+      APPEND PROPERTY COMPILE_DEFINITIONS CRYPTO_LIB="${LIBCRYPTO_SONAME}")
+  endif()
+
   add_subdirectory(rgw)
+
 endif(WITH_RADOSGW)
 
 install(FILES
@@ -930,7 +1000,7 @@ configure_file(
 add_subdirectory(brag)
 
 # Everything you need to spin up a cluster with vstart.sh
-add_custom_target(vstart DEPENDS
+add_custom_target(vstart-base DEPENDS
     ceph-osd
     ceph-mon
     ceph-mgr
@@ -938,11 +1008,17 @@ add_custom_target(vstart DEPENDS
     ceph-conf
     monmaptool
     crushtool
+    rados
     cython_rados
+    )
+
+add_custom_target(vstart DEPENDS
+    vstart-base
     ceph-mds)
 if(WITH_RADOSGW)
   add_dependencies(vstart radosgw radosgw-admin)
 endif(WITH_RADOSGW)
+
 
 # Everything you need to run CephFS tests
 add_custom_target(cephfs_testing DEPENDS
@@ -966,3 +1042,7 @@ if (IS_DIRECTORY "${PROJECT_SOURCE_DIR}/.git")
 endif()
 
 add_subdirectory(script)
+
+if(WITH_EMBEDDED)
+  add_subdirectory(libcephd)
+endif()

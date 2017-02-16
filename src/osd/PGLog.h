@@ -258,10 +258,10 @@ public:
 
     bool get_request(
       const osd_reqid_t &r,
-      eversion_t *replay_version,
+      eversion_t *version,
       version_t *user_version,
       int *return_code) const {
-      assert(replay_version);
+      assert(version);
       assert(user_version);
       assert(return_code);
       ceph::unordered_map<osd_reqid_t,pg_log_entry_t*>::const_iterator p;
@@ -270,7 +270,7 @@ public:
       }
       p = caller_ops.find(r);
       if (p != caller_ops.end()) {
-	*replay_version = p->second->version;
+	*version = p->second->version;
 	*user_version = p->second->user_version;
 	*return_code = p->second->return_code;
 	return true;
@@ -288,7 +288,7 @@ public:
 	     i != p->second->extra_reqids.end();
 	     ++i) {
 	  if (i->first == r) {
-	    *replay_version = p->second->version;
+	    *version = p->second->version;
 	    *user_version = i->second;
 	    *return_code = p->second->return_code;
 	    return true;
@@ -475,6 +475,7 @@ public:
     }
 
     void trim(
+      CephContext* cct,
       eversion_t s,
       set<eversion_t> *trimmed);
 
@@ -558,8 +559,8 @@ public:
   PGLog(CephContext *cct, DoutPrefixProvider *dpp = 0) :
     prefix_provider(dpp),
     dirty_from(eversion_t::max()),
-    writeout_from(eversion_t::max()), 
-    cct(cct), 
+    writeout_from(eversion_t::max()),
+    cct(cct),
     pg_log_debug(!(cct && !(cct->_conf->osd_debug_pg_log_writeout))),
     touched_log(false),
     clear_divergent_priors(false) {}
@@ -572,10 +573,6 @@ public:
   //////////////////// get or set missing ////////////////////
 
   const pg_missing_tracker_t& get_missing() const { return missing; }
-  void resort_missing(bool sort_bitwise) {
-    missing.resort(sort_bitwise);
-  }
-
   void revise_have(hobject_t oid, eversion_t have) {
     missing.revise_have(oid, have);
   }
@@ -711,7 +708,7 @@ public:
 protected:
   static void split_by_object(
     mempool::osd::list<pg_log_entry_t> &entries,
-    map<hobject_t, mempool::osd::list<pg_log_entry_t>, hobject_t::BitwiseComparator> *out_entries) {
+    map<hobject_t, mempool::osd::list<pg_log_entry_t>> *out_entries) {
     while (!entries.empty()) {
       mempool::osd::list<pg_log_entry_t> &out_list = (*out_entries)[entries.front().soid];
       out_list.splice(out_list.end(), entries, entries.begin());
@@ -752,7 +749,7 @@ protected:
     ldpp_dout(dpp, 20) << __func__ << ": merging hoid " << hoid
 		       << " entries: " << entries << dendl;
 
-    if (cmp(hoid, info.last_backfill, info.last_backfill_bitwise) > 0) {
+    if (hoid > info.last_backfill) {
       ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid << " after last_backfill"
 			 << dendl;
       return;
@@ -931,9 +928,9 @@ protected:
     LogEntryHandler *rollbacker,         ///< [in] optional rollbacker object
     const DoutPrefixProvider *dpp        ///< [in] logging provider
     ) {
-    map<hobject_t, mempool::osd::list<pg_log_entry_t>, hobject_t::BitwiseComparator > split;
+    map<hobject_t, mempool::osd::list<pg_log_entry_t> > split;
     split_by_object(entries, &split);
-    for (map<hobject_t, mempool::osd::list<pg_log_entry_t>, hobject_t::BitwiseComparator>::iterator i = split.begin();
+    for (map<hobject_t, mempool::osd::list<pg_log_entry_t>>::iterator i = split.begin();
 	 i != split.end();
 	 ++i) {
       _merge_object_divergent_entries(
@@ -1001,7 +998,7 @@ public:
 	ldpp_dout(dpp, 20) << "update missing, append " << *p << dendl;
 	log->add(*p);
       }
-      if (cmp(p->soid, last_backfill, last_backfill_bitwise) <= 0 &&
+      if (p->soid <= last_backfill &&
 	  !p->is_error()) {
 	missing.add_next_event(*p);
 	if (rollbacker) {
@@ -1184,14 +1181,14 @@ public:
 			   << info.last_complete
 			   << "," << info.last_update << "]" << dendl;
 
-	set<hobject_t, hobject_t::BitwiseComparator> did;
-	set<hobject_t, hobject_t::BitwiseComparator> checked;
-	set<hobject_t, hobject_t::BitwiseComparator> skipped;
+	set<hobject_t> did;
+	set<hobject_t> checked;
+	set<hobject_t> skipped;
 	for (list<pg_log_entry_t>::reverse_iterator i = log.log.rbegin();
 	     i != log.log.rend();
 	     ++i) {
 	  if (!debug_verify_stored_missing && i->version <= info.last_complete) break;
-	  if (cmp(i->soid, info.last_backfill, info.last_backfill_bitwise) > 0)
+	  if (i->soid > info.last_backfill)
 	    continue;
 	  if (i->is_error())
 	    continue;
@@ -1239,10 +1236,10 @@ public:
 	    if (checked.count(i.first))
 	      continue;
 	    if (i.second.need > log.tail ||
-	      cmp(i.first, info.last_backfill, info.last_backfill_bitwise) > 0) {
-	      derr << __func__ << ": invalid missing set entry found "
-		   << i.first
-		   << dendl;
+	      i.first > info.last_backfill) {
+	      lderr(dpp->get_cct()) << __func__ << ": invalid missing set entry found "
+				    << i.first
+				    << dendl;
 	      assert(0 == "invalid missing set entry found");
 	    }
 	    bufferlist bv;
@@ -1265,7 +1262,7 @@ public:
 	       i != divergent_priors.rend();
 	       ++i) {
 	    if (i->first <= info.last_complete) break;
-	    if (cmp(i->second, info.last_backfill, info.last_backfill_bitwise) > 0)
+	    if (i->second > info.last_backfill)
 	      continue;
 	    if (did.count(i->second)) continue;
 	    did.insert(i->second);
@@ -1308,5 +1305,5 @@ public:
     ldpp_dout(dpp, 10) << "read_log_and_missing done" << dendl;
   }
 };
-  
+
 #endif // CEPH_PG_LOG_H

@@ -23,10 +23,8 @@
 
 #include "include/assert.h" // fio.h clobbers our assert.h
 
-
-// enable boost::intrusive_ptr<CephContext>
-void intrusive_ptr_add_ref(CephContext* cct) { cct->get(); }
-void intrusive_ptr_release(CephContext* cct) { cct->put(); }
+#define dout_context g_ceph_context
+#define dout_subsys ceph_subsys_
 
 namespace {
 
@@ -86,7 +84,13 @@ struct Engine {
     std::lock_guard<std::mutex> l(lock);
     --ref_count;
     if (!ref_count) {
+      ostringstream ostr;
+      Formatter* f = Formatter::create("json-pretty", "json-pretty", "json-pretty");
+      os->dump_perf_counters(f);
+      f->flush(ostr);
+      delete f;
       os->umount();
+      dout(0) << "FIO plugin " << ostr.str() << dendl;
     }
   }
 };
@@ -107,11 +111,10 @@ Engine::Engine(const thread_data* td) : ref_count(0)
     args.emplace_back(td->o.directory);
   }
 
-  global_init(nullptr, args, CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
   // claim the g_ceph_context reference and release it on destruction
-  cct = boost::intrusive_ptr<CephContext>(g_ceph_context, false);
+  cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_OSD,
+			 CODE_ENVIRONMENT_UTILITY, 0);
+  common_init_finish(g_ceph_context);
 
   // create the ObjectStore
   os.reset(ObjectStore::create(g_ceph_context,
@@ -340,7 +343,10 @@ int fio_ceph_os_queue(thread_data* td, io_u* u)
     // enqueue a write transaction on the collection's sequencer
     ObjectStore::Transaction t;
     t.write(coll.cid, object.oid, u->offset, u->xfer_buflen, bl, flags);
-    os->queue_transaction(&coll.sequencer, std::move(t), new UnitComplete(u));
+    os->queue_transaction(&coll.sequencer,
+                          std::move(t),
+                          nullptr,
+                          new UnitComplete(u));
     return FIO_Q_QUEUED;
   }
 

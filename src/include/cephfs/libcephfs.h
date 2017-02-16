@@ -153,6 +153,18 @@ UserPerm *ceph_userperm_new(uid_t uid, gid_t gid, int ngids, gid_t *gidlist);
 void ceph_userperm_destroy(UserPerm *perm);
 
 /**
+ * Get a pointer to the default UserPerm object for the mount.
+ *
+ * @param cmount the mount info handle
+ *
+ * Every cmount has a default set of credentials. This returns a pointer to
+ * that object.
+ *
+ * Unlike with ceph_userperm_new, this object should not be freed.
+ */
+struct UserPerm *ceph_mount_perms(struct ceph_mount_info *cmount);
+
+/**
  * @defgroup libcephfs_h_init Setup and Teardown
  * These are the first and last functions that should be called
  * when using libcephfs.
@@ -196,7 +208,10 @@ int ceph_create(struct ceph_mount_info **cmount, const char * const id);
 int ceph_create_with_context(struct ceph_mount_info **cmount, struct CephContext *conf);
 
 
+#ifndef VOIDPTR_RADOS_T
+#define VOIDPTR_RADOS_T
 typedef void *rados_t;
+#endif // VOIDPTR_RADOS_T
 
 /**
  * Create a mount handle from a rados_t, for using libcephfs in the
@@ -229,9 +244,6 @@ int ceph_init(struct ceph_mount_info *cmount);
  * @returns 0 on success, negative error code on failure
  */
 int ceph_mount(struct ceph_mount_info *cmount, const char *root);
-
-
-struct UserPerm *ceph_mount_perms(struct ceph_mount_info *cmount);
 
 /**
  * Execute a management command remotely on an MDS.
@@ -648,6 +660,19 @@ int ceph_unlink(struct ceph_mount_info *cmount, const char *path);
 int ceph_rename(struct ceph_mount_info *cmount, const char *from, const char *to);
 
 /**
+ * Get an open file's extended statistics and attributes.
+ *
+ * @param cmount the ceph mount handle to use for performing the stat.
+ * @param fd the file descriptor of the file to get statistics of.
+ * @param stx the ceph_statx struct that will be filled in with the file's statistics.
+ * @param want bitfield of CEPH_STATX_* flags showing designed attributes
+ * @param flags bitfield that can be used to set AT_* modifier flags (only AT_NO_ATTR_SYNC and AT_SYMLINK_NOFOLLOW)
+ * @returns 0 on success or negative error code on failure.
+ */
+int ceph_fstatx(struct ceph_mount_info *cmount, int fd, struct ceph_statx *stx,
+		unsigned int want, unsigned int flags);
+
+/**
  * Get a file's extended statistics and attributes.
  *
  * @param cmount the ceph mount handle to use for performing the stat.
@@ -933,19 +958,6 @@ int ceph_fsync(struct ceph_mount_info *cmount, int fd, int syncdataonly);
 int ceph_fallocate(struct ceph_mount_info *cmount, int fd, int mode,
 	                      int64_t offset, int64_t length);
 
-/**
- * Get an open file's extended statistics and attributes.
- *
- * @param cmount the ceph mount handle to use for performing the stat.
- * @param fd the file descriptor of the file to get statistics of.
- * @param stx the ceph_statx struct that will be filled in with the file's statistics.
- * @param want bitfield of CEPH_STATX_* flags showing designed attributes
- * @param flags bitfield that can be used to set AT_* modifier flags (only AT_NO_ATTR_SYNC and AT_SYMLINK_NOFOLLOW)
- * @returns 0 on success or negative error code on failure.
- */
-int ceph_fstatx(struct ceph_mount_info *cmount, int fd, struct ceph_statx *stx,
-		unsigned int want, unsigned int flags);
-
 /** @} file */
 
 /**
@@ -982,7 +994,7 @@ int ceph_fgetxattr(struct ceph_mount_info *cmount, int fd, const char *name,
 	void *value, size_t size);
 
 /**
- * Get an extended attribute wihtout following symbolic links.  This function is
+ * Get an extended attribute without following symbolic links.  This function is
  * identical to ceph_getxattr, but if the path refers to a symbolic link,
  * we get the extended attributes of the symlink rather than the attributes
  * of the link itself.

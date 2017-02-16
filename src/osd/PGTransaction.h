@@ -20,6 +20,7 @@
 
 #include "common/hobject.h"
 #include "osd/osd_types.h"
+#include "osd/osd_internal_types.h"
 #include "common/interval_map.h"
 #include "common/inline_variant.h"
 
@@ -36,7 +37,7 @@
  */
 class PGTransaction {
 public:
-  map<hobject_t, ObjectContextRef, hobject_t::BitwiseComparator> obc_map;
+  map<hobject_t, ObjectContextRef> obc_map;
 
   class ObjectOperation {
   public:
@@ -83,6 +84,9 @@ public:
      * ECBackend transaction planning needs this context
      * to figure out how to perform the transaction.
      */
+    bool deletes_first() const {
+      return delete_first;
+    }
     bool is_delete() const {
       return boost::get<Init::None>(&init_type) != nullptr && delete_first;
     }
@@ -91,6 +95,9 @@ public:
     }
     bool is_fresh_object() const {
       return boost::get<Init::None>(&init_type) == nullptr;
+    }
+    bool is_rename() const {
+      return boost::get<Init::Rename>(&init_type) != nullptr;
     }
     bool has_source(hobject_t *source = nullptr) const {
       return match(
@@ -239,7 +246,7 @@ public:
 
     friend class PGTransaction;
   };
-  map<hobject_t, ObjectOperation, hobject_t::BitwiseComparator> op_map;
+  map<hobject_t, ObjectOperation> op_map;
 private:
   ObjectOperation &get_object_op_for_modify(const hobject_t &hoid) {
     auto &op = op_map[hoid];
@@ -295,14 +302,19 @@ public:
     op.init_type = ObjectOperation::Init::Rename{source};
   }
 
-  /// Remove
+  /// Remove -- must not be called on rename target
   void remove(
     const hobject_t &hoid          ///< [in] obj to remove
     ) {
     auto &op = get_object_op_for_modify(hoid);
-    assert(!op.updated_snaps);
-    op = ObjectOperation();
-    op.delete_first = true;
+    if (!op.is_fresh_object()) {
+      assert(!op.updated_snaps);
+      op = ObjectOperation();
+      op.delete_first = true;
+    } else {
+      assert(!op.is_rename());
+      op_map.erase(hoid); // make it a noop if it's a fresh object
+    }
   }
 
   void update_snaps(
@@ -498,7 +510,7 @@ public:
    * object clone from source case (make_writeable made a clone).
    *
    * This structure only requires that the source->sink graph be acyclic.
-   * This is much more general than is actually required by ReplicatedPG.
+   * This is much more general than is actually required by PrimaryLogPG.
    * Only 4 flavors of multi-object transactions actually happen:
    * 1) rename temp -> object for copyfrom
    * 2) clone head -> clone, modify head for make_writeable on normal head write
@@ -512,7 +524,7 @@ public:
    */
   template <typename T>
   void safe_create_traverse(T &&t) {
-    map<hobject_t, list<hobject_t>, hobject_t::BitwiseComparator> dgraph;
+    map<hobject_t, list<hobject_t>> dgraph;
     list<hobject_t> stack;
 
     // Populate stack with roots, dgraph with edges

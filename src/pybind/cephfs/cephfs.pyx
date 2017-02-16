@@ -124,6 +124,7 @@ cdef extern from "cephfs/libcephfs.h" nogil:
     int ceph_link(ceph_mount_info *cmount, const char *existing, const char *newname)
     int ceph_unlink(ceph_mount_info *cmount, const char *path)
     int ceph_symlink(ceph_mount_info *cmount, const char *existing, const char *newname)
+    int ceph_readlink(ceph_mount_info *cmount, const char *path, char *buf, int64_t size)
     int ceph_setxattr(ceph_mount_info *cmount, const char *path, const char *name,
                       const void *value, size_t size, int flags)
     int ceph_getxattr(ceph_mount_info *cmount, const char *path, const char *name,
@@ -197,18 +198,32 @@ class WouldBlock(Error):
 class OutOfRange(Error):
     pass
 
-cdef errno_to_exception =  {
-    errno.EPERM      : PermissionError,
-    errno.ENOENT     : ObjectNotFound,
-    errno.EIO        : IOError,
-    errno.ENOSPC     : NoSpace,
-    errno.EEXIST     : ObjectExists,
-    errno.ENODATA    : NoData,
-    errno.EINVAL     : InvalidValue,
-    errno.EOPNOTSUPP : OperationNotSupported,
-    errno.ERANGE     : OutOfRange,
-    errno.EWOULDBLOCK: WouldBlock,
-}
+IF UNAME_SYSNAME == "FreeBSD":
+    cdef errno_to_exception =  {
+        errno.EPERM      : PermissionError,
+        errno.ENOENT     : ObjectNotFound,
+        errno.EIO        : IOError,
+        errno.ENOSPC     : NoSpace,
+        errno.EEXIST     : ObjectExists,
+        errno.ENOATTR    : NoData,
+        errno.EINVAL     : InvalidValue,
+        errno.EOPNOTSUPP : OperationNotSupported,
+        errno.ERANGE     : OutOfRange,
+        errno.EWOULDBLOCK: WouldBlock,
+    }
+ELSE:
+    cdef errno_to_exception =  {
+        errno.EPERM      : PermissionError,
+        errno.ENOENT     : ObjectNotFound,
+        errno.EIO        : IOError,
+        errno.ENOSPC     : NoSpace,
+        errno.EEXIST     : ObjectExists,
+        errno.ENODATA    : NoData,
+        errno.EINVAL     : InvalidValue,
+        errno.EOPNOTSUPP : OperationNotSupported,
+        errno.ERANGE     : OutOfRange,
+        errno.EWOULDBLOCK: WouldBlock,
+    }
 
 
 cdef make_ex(ret, msg):
@@ -324,6 +339,13 @@ cdef class LibCephFS(object):
                                   "CephFS object in state %s." % (self.state))
 
     def __cinit__(self, conf=None, conffile=None, auth_id=None, rados_inst=None):
+        """Create a libcephfs wrapper
+
+        :param conf dict opt: settings overriding the default ones and conffile
+        :param conffile str opt: the path to ceph.conf to override the default settings
+        :auth_id str opt: the id used to authenticate the client entity
+        :rados_inst Rados opt: a rados.Rados instance
+        """
         PyEval_InitThreads()
         self.state = "uninitialized"
         if rados_inst is not None:
@@ -346,7 +368,7 @@ cdef class LibCephFS(object):
         if conf is not None and not isinstance(conf, dict):
             raise TypeError("conf must be dict or None")
         cstr(conffile, 'configfile', opt=True)
-        auth_id = cstr(auth_id, 'configfile', opt=True)
+        auth_id = cstr(auth_id, 'auth_id', opt=True)
 
         cdef:
             char* _auth_id = opt_str(auth_id)
@@ -863,6 +885,25 @@ cdef class LibCephFS(object):
             ret = ceph_link(self.cluster, _existing, _newname)
         if ret < 0:
             raise make_ex(ret, "error in link")    
+    
+    def readlink(self, path, size):
+        self.require_state("mounted")
+        path = cstr(path, 'path')
+
+        cdef:
+            char* _path = path
+            int64_t _size = size
+            char *buf = NULL
+
+        try:
+            buf = <char *>realloc_chk(buf, _size)
+            with nogil:
+                ret = ceph_readlink(self.cluster, _path, buf, _size)
+            if ret < 0:
+                raise make_ex(ret, "error in readlink")
+            return buf
+        finally:
+            free(buf)
 
     def unlink(self, path):
         self.require_state("mounted")

@@ -95,7 +95,10 @@ class MessengerClient {
         if (inflight > uint64_t(concurrent)) {
           cond.Wait(lock);
         }
-        MOSDOp *m = new MOSDOp(client_inc.read(), 0, oid, oloc, pgid, 0, 0, 0);
+	hobject_t hobj(oid, oloc.key, CEPH_NOSNAP, pgid.ps(), pgid.pool(),
+		       oloc.nspace);
+	spg_t spgid(pgid);
+        MOSDOp *m = new MOSDOp(client_inc.read(), 0, hobj, spgid, 0, 0, 0);
         m->write(0, msg_len, data);
         inflight++;
         conn->send_message(m);
@@ -173,7 +176,8 @@ int main(int argc, char **argv)
   vector<const char*> args;
   argv_to_vec(argc, (const char **)argv, args);
 
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
+  auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_UTILITY, 0);
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->apply_changes(NULL);
 
@@ -188,14 +192,18 @@ int main(int argc, char **argv)
   int think_time = atoi(args[4]);
   int len = atoi(args[5]);
 
-  cerr << " using ms-type " << g_ceph_context->_conf->ms_type << std::endl;
+  std::string public_msgr_type = g_ceph_context->_conf->ms_public_type.empty() ? g_ceph_context->_conf->ms_type : g_ceph_context->_conf->ms_public_type;
+
+  cerr << " using ms-public-type " << public_msgr_type << std::endl;
   cerr << "       server ip:port " << args[0] << std::endl;
   cerr << "       numjobs " << numjobs << std::endl;
   cerr << "       concurrency " << concurrent << std::endl;
   cerr << "       ios " << ios << std::endl;
   cerr << "       thinktime(us) " << think_time << std::endl;
   cerr << "       message data bytes " << len << std::endl;
-  MessengerClient client(g_ceph_context->_conf->ms_type, args[0], think_time);
+
+  MessengerClient client(public_msgr_type, args[0], think_time);
+
   client.ready(concurrent, numjobs, ios, len);
   Cycles::init();
   uint64_t start = Cycles::rdtsc();

@@ -253,6 +253,7 @@ private:
   int m_last_r = 0;
   std::string m_state_desc;
   BootstrapProgressContext m_progress_cxt;
+  bool m_do_resync;
   image_replayer::EventPreprocessor<ImageCtxT> *m_event_preprocessor = nullptr;
   image_replayer::ReplayStatusFormatter<ImageCtxT> *m_replay_status_formatter =
     nullptr;
@@ -291,6 +292,7 @@ private:
   librbd::journal::TagData m_replay_tag_data;
   librbd::journal::EventEntry m_event_entry;
   AsyncOpTracker m_event_replay_tracker;
+  Context *m_delayed_preprocess_task = nullptr;
 
   struct RemoteJournalerListener : public ::journal::JournalMetadataListener {
     ImageReplayer *replayer;
@@ -360,7 +362,8 @@ private:
   void handle_allocate_local_tag(int r);
 
   void preprocess_entry();
-  void handle_preprocess_entry(int r);
+  void handle_preprocess_entry_ready(int r);
+  void handle_preprocess_entry_safe(int r);
 
   void process_entry();
   void handle_process_entry_ready(int r);

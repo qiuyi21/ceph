@@ -25,6 +25,10 @@
 #include "common/Timer.h"
 #include "common/errno.h"
 
+#include "messages/MOSDOp.h"
+#include "messages/MOSDOpReply.h"
+#include "common/EventTrace.h"
+
 #define dout_subsys ceph_subsys_ms
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
@@ -51,11 +55,13 @@ class Processor::C_processor_accept : public EventCallback {
   }
 };
 
-Processor::Processor(AsyncMessenger *r, Worker *w, CephContext *c, uint64_t n)
-  : msgr(r), net(c), worker(w), nonce(n),
+Processor::Processor(AsyncMessenger *r, Worker *w, CephContext *c)
+  : msgr(r), net(c), worker(w),
     listen_handler(new C_processor_accept(this)) {}
 
-int Processor::bind(const entity_addr_t &bind_addr, const set<int>& avoid_ports)
+int Processor::bind(const entity_addr_t &bind_addr,
+		    const set<int>& avoid_ports,
+		    entity_addr_t* bound_addr)
 {
   const md_config_t *conf = msgr->cct->_conf;
   // bind to a socket
@@ -137,40 +143,8 @@ int Processor::bind(const entity_addr_t &bind_addr, const set<int>& avoid_ports)
   }
 
   ldout(msgr->cct, 10) << __func__ << " bound to " << listen_addr << dendl;
-
-  msgr->set_myaddr(bind_addr);
-  if (bind_addr != entity_addr_t())
-    msgr->learned_addr(bind_addr);
-
-  if (msgr->get_myaddr().get_port() == 0) {
-    msgr->set_myaddr(listen_addr);
-  }
-  entity_addr_t addr = msgr->get_myaddr();
-  addr.nonce = nonce;
-  msgr->set_myaddr(addr);
-
-  msgr->init_local_connection();
-
-  ldout(msgr->cct,1) << __func__ << " bind my_inst.addr is " << msgr->get_myaddr() << dendl;
+  *bound_addr = listen_addr;
   return 0;
-}
-
-int Processor::rebind(const set<int>& avoid_ports)
-{
-  ldout(msgr->cct, 1) << __func__ << " rebind avoid " << avoid_ports << dendl;
-
-  entity_addr_t addr = msgr->get_myaddr();
-  set<int> new_avoid = avoid_ports;
-  new_avoid.insert(addr.get_port());
-  addr.set_port(0);
-
-  // adjust the nonce; we want our entity_addr_t to be truly unique.
-  nonce += 1000000;
-  msgr->my_inst.addr.nonce = nonce;
-  ldout(msgr->cct, 10) << __func__ << " new nonce " << nonce << " and inst " << msgr->my_inst << dendl;
-
-  ldout(msgr->cct, 10) << __func__ << " will try " << addr << " and avoid ports " << new_avoid << dendl;
-  return bind(addr, new_avoid);
 }
 
 void Processor::start()
@@ -239,9 +213,13 @@ void Processor::stop()
 
 
 struct StackSingleton {
+  CephContext *cct;
   std::shared_ptr<NetworkStack> stack;
-  StackSingleton(CephContext *c) {
-    stack = NetworkStack::create(c, c->_conf->ms_async_transport_type);
+
+  StackSingleton(CephContext *c): cct(c) {}
+  void ready(std::string &type) {
+    if (!stack)
+      stack = NetworkStack::create(cct, type);
   }
   ~StackSingleton() {
     stack->stop();
@@ -265,7 +243,7 @@ class C_handle_reap : public EventCallback {
  */
 
 AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
-                               string mname, uint64_t _nonce)
+                               const std::string &type, string mname, uint64_t _nonce)
   : SimplePolicyMessenger(cct, name,mname, _nonce),
     dispatch_queue(cct, this, mname),
     lock("AsyncMessenger::lock"),
@@ -273,9 +251,16 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
     global_seq(0), deleted_lock("AsyncMessenger::deleted_lock"),
     cluster_protocol(0), stopped(true)
 {
+  std::string transport_type = "posix";
+  if (type.find("rdma") != std::string::npos)
+    transport_type = "rdma";
+  else if (type.find("dpdk") != std::string::npos)
+    transport_type = "dpdk";
+
   ceph_spin_init(&global_seq_lock);
   StackSingleton *single;
-  cct->lookup_or_create_singleton_object<StackSingleton>(single, "AsyncMessenger::NetworkStack");
+  cct->lookup_or_create_singleton_object<StackSingleton>(single, "AsyncMessenger::NetworkStack::"+transport_type);
+  single->ready(transport_type);
   stack = single->stack.get();
   stack->start();
   local_worker = stack->get_worker();
@@ -286,7 +271,7 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
   if (stack->support_local_listen_table())
     processor_num = stack->get_num_worker();
   for (unsigned i = 0; i < processor_num; ++i)
-    processors.push_back(new Processor(this, stack->get_worker(i), cct, _nonce));
+    processors.push_back(new Processor(this, stack->get_worker(i), cct));
 }
 
 /**
@@ -346,11 +331,11 @@ int AsyncMessenger::bind(const entity_addr_t &bind_addr)
 
   // bind to a socket
   set<int> avoid_ports;
-  int r = 0;
+  entity_addr_t bound_addr;
   unsigned i = 0;
   for (auto &&p : processors) {
-    r = p->bind(bind_addr, avoid_ports);
-    if (r < 0) {
+    int r = p->bind(bind_addr, avoid_ports, &bound_addr);
+    if (r) {
       // Note: this is related to local tcp listen table problem.
       // Posix(default kernel implementation) backend shares listen table
       // in the kernel, so all threads can use the same listen table naturally
@@ -361,13 +346,12 @@ int AsyncMessenger::bind(const entity_addr_t &bind_addr)
       // but the second worker failed, it's not expected and we need to assert
       // here
       assert(i == 0);
-      break;
+      return r;
     }
     ++i;
   }
-  if (r >= 0)
-    did_bind = true;
-  return r;
+  _finish_bind(bind_addr, bound_addr);
+  return 0;
 }
 
 int AsyncMessenger::rebind(const set<int>& avoid_ports)
@@ -378,19 +362,72 @@ int AsyncMessenger::rebind(const set<int>& avoid_ports)
   for (auto &&p : processors)
     p->stop();
   mark_down_all();
+
+  // adjust the nonce; we want our entity_addr_t to be truly unique.
+  nonce += 1000000;
+  ldout(cct, 10) << __func__ << " new nonce " << nonce
+		 << " and inst " << get_myinst() << dendl;
+
+  entity_addr_t bound_addr;
+  entity_addr_t bind_addr = get_myaddr();
+  bind_addr.set_port(0);
+  set<int> new_avoid(avoid_ports);
+  new_avoid.insert(bind_addr.get_port());
+  ldout(cct, 10) << __func__ << " will try " << bind_addr
+		 << " and avoid ports " << new_avoid << dendl;
   unsigned i = 0;
-  int r = 0;
   for (auto &&p : processors) {
-    r = p->rebind(avoid_ports);
-    if (r == 0) {
-      p->start();
-    } else {
+    int r = p->bind(bind_addr, avoid_ports, &bound_addr);
+    if (r) {
       assert(i == 0);
-      break;
+      return r;
     }
-    i++;
+    ++i;
   }
-  return r;
+  _finish_bind(bind_addr, bound_addr);
+  for (auto &&p : processors) {
+    p->start();
+  }
+  return 0;
+}
+
+int AsyncMessenger::client_bind(const entity_addr_t &bind_addr)
+{
+  lock.Lock();
+  if (did_bind) {
+    assert(my_inst.addr == bind_addr);
+    return 0;
+  }
+  if (started) {
+    ldout(cct, 10) << __func__ << " already started" << dendl;
+    lock.Unlock();
+    return -1;
+  }
+  ldout(cct, 10) << __func__ << " " << bind_addr << dendl;
+  lock.Unlock();
+
+  set_myaddr(bind_addr);
+  return 0;
+}
+
+void AsyncMessenger::_finish_bind(const entity_addr_t& bind_addr,
+				  const entity_addr_t& listen_addr)
+{
+  set_myaddr(bind_addr);
+  if (bind_addr != entity_addr_t())
+    learned_addr(bind_addr);
+
+  if (get_myaddr().get_port() == 0) {
+    set_myaddr(listen_addr);
+  }
+  entity_addr_t addr = get_myaddr();
+  addr.set_nonce(nonce);
+  set_myaddr(addr);
+
+  init_local_connection();
+
+  ldout(cct,1) << __func__ << " bind my_inst.addr is " << get_myaddr() << dendl;
+  did_bind = true;
 }
 
 int AsyncMessenger::start()
@@ -497,6 +534,12 @@ ConnectionRef AsyncMessenger::get_loopback_connection()
 
 int AsyncMessenger::_send_message(Message *m, const entity_inst_t& dest)
 {
+  FUNCTRACE();
+  if (m && m->get_type() == CEPH_MSG_OSD_OP)
+    OID_EVENT_TRACE(((MOSDOp *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP");
+  else if (m && m->get_type() == CEPH_MSG_OSD_OPREPLY)
+    OID_EVENT_TRACE(((MOSDOpReply *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP_REPLY");
+
   ldout(cct, 1) << __func__ << "--> " << dest.name << " "
       << dest.addr << " -- " << *m << " -- ?+"
       << m->get_data().length() << " " << m << dendl;

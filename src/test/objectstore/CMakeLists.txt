@@ -20,7 +20,7 @@ set_target_properties(ceph_test_objectstore PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(ceph_test_objectstore
   os
-  common
+  ceph-common
   ${UNITTEST_LIBS}
   global
   ${EXTRALIBS}
@@ -38,7 +38,7 @@ set_target_properties(ceph_test_keyvaluedb PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(ceph_test_keyvaluedb
   os
-  common
+  ceph-common
   ${UNITTEST_LIBS}
   global
   ${EXTRALIBS}
@@ -102,6 +102,7 @@ target_link_libraries(unittest_chain_xattr os global)
 # unittest_rocksdb_option
 add_executable(unittest_rocksdb_option
   TestRocksdbOptionParse.cc
+  $<TARGET_OBJECTS:unit-main>
   )
 add_ceph_unittest(unittest_rocksdb_option ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_rocksdb_option)
 target_link_libraries(unittest_rocksdb_option global os ${BLKID_LIBRARIES})
@@ -110,12 +111,14 @@ if(HAVE_LIBAIO)
   # unittest_bit_alloc
   add_executable(unittest_bit_alloc
     BitAllocator_test.cc
+    $<TARGET_OBJECTS:unit-main>
     )
   add_ceph_unittest(unittest_bit_alloc ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_bit_alloc)
   target_link_libraries(unittest_bit_alloc os global)
 
   add_executable(unittest_alloc
     Allocator_test.cc
+    $<TARGET_OBJECTS:unit-main>
     )
   add_ceph_unittest(unittest_alloc ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_alloc)
   target_link_libraries(unittest_alloc os global)
@@ -139,7 +142,7 @@ endif(HAVE_LIBAIO)
 add_executable(unittest_transaction
   test_transaction.cc)
 add_ceph_unittest(unittest_transaction ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_transaction)
-target_link_libraries(unittest_transaction os common ${XIO_LIBRARY})
+target_link_libraries(unittest_transaction os ceph-common ${XIO_LIBRARY})
 
 # unittest_memstore_clone
 add_executable(unittest_memstore_clone

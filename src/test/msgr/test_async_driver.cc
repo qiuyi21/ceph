@@ -57,6 +57,7 @@
 
 #include <gtest/gtest.h>
 
+
 #if GTEST_HAS_PARAM_TEST
 
 class EventDriverTest : public ::testing::TestWithParam<const char*> {
@@ -255,7 +256,7 @@ class FakeEvent : public EventCallback {
 TEST(EventCenterTest, FileEventExpansion) {
   vector<int> sds;
   EventCenter center(g_ceph_context);
-  center.init(100, 0);
+  center.init(100, 0, "posix");
   center.set_owner();
   EventCallbackRef e(new FakeEvent());
   for (int i = 0; i < 300; i++) {
@@ -276,7 +277,7 @@ class Worker : public Thread {
  public:
   EventCenter center;
   explicit Worker(CephContext *c, int idx): cct(c), done(false), center(c) {
-    center.init(100, idx);
+    center.init(100, idx, "posix");
   }
   void stop() {
     done = true; 
@@ -353,17 +354,6 @@ TEST(DummyTest, ValueParameterizedTestsAreNotSupportedOnThisPlatform) {}
 
 #endif
 
-
-int main(int argc, char **argv) {
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
 
 /*
  * Local Variables:

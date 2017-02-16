@@ -41,11 +41,11 @@ TYPE_FEATUREFUL(entity_inst_t)
 #include "osd/OSDMap.h"
 TYPE(osd_info_t)
 TYPE(osd_xinfo_t)
-TYPE_FEATUREFUL_STRAYDATA(OSDMap)
+TYPE_FEATUREFUL_NOCOPY(OSDMap)
 TYPE_FEATUREFUL_STRAYDATA(OSDMap::Incremental)
 
 #include "crush/CrushWrapper.h"
-TYPE_NOCOPY(CrushWrapper)
+TYPE_FEATUREFUL_NOCOPY(CrushWrapper)
 
 #include "common/histogram.h"
 TYPE(pow2_hist_t)
@@ -558,8 +558,6 @@ MESSAGE(MOSDPGCreate)
 MESSAGE(MOSDPGInfo)
 #include "messages/MOSDPGLog.h"
 MESSAGE(MOSDPGLog)
-#include "messages/MOSDPGMissing.h"
-MESSAGE(MOSDPGMissing)
 #include "messages/MOSDPGNotify.h"
 MESSAGE(MOSDPGNotify)
 #include "messages/MOSDPGQuery.h"

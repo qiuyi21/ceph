@@ -17,6 +17,7 @@ public:
   RGWGetObj_ObjStore_SWIFT() {}
   ~RGWGetObj_ObjStore_SWIFT() {}
 
+  int verify_permission() override;
   int get_params();
   int send_response_data_error();
   int send_response_data(bufferlist& bl, off_t ofs, off_t len);
@@ -32,6 +33,7 @@ public:
 
 class RGWListBuckets_ObjStore_SWIFT : public RGWListBuckets_ObjStore {
   bool need_stats;
+  std::string prefix;
 
   uint64_t get_default_max() const override {
     return 0;

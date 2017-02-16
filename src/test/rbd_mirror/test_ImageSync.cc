@@ -79,7 +79,7 @@ public:
     C_SaferCond ctx;
     {
       RWLock::RLocker owner_locker((*image_ctx)->owner_lock);
-      (*image_ctx)->exclusive_lock->try_lock(&ctx);
+      (*image_ctx)->exclusive_lock->try_acquire_lock(&ctx);
     }
     ASSERT_EQ(0, ctx.wait());
     ASSERT_TRUE((*image_ctx)->exclusive_lock->is_lock_owner());
@@ -134,6 +134,88 @@ TEST_F(TestImageSync, Simple) {
                    offset, object_size, read_local_bl.c_str(), 0));
     ASSERT_TRUE(read_remote_bl.contents_equal(read_local_bl));
   }
+}
+
+TEST_F(TestImageSync, Resize) {
+  int64_t object_size = std::min<int64_t>(
+    m_remote_image_ctx->size, 1 << m_remote_image_ctx->order);
+
+  uint64_t off = 0;
+  uint64_t len = object_size / 10;
+
+  std::string str(len, '1');
+  ASSERT_EQ((int)len, m_remote_image_ctx->aio_work_queue->write(off, len,
+                                                                str.c_str(), 0));
+  {
+    RWLock::RLocker owner_locker(m_remote_image_ctx->owner_lock);
+    ASSERT_EQ(0, m_remote_image_ctx->flush());
+  }
+
+  ASSERT_EQ(0, create_snap(m_remote_image_ctx, "snap", nullptr));
+
+  uint64_t size = object_size - 1;
+  librbd::NoOpProgressContext no_op_progress_ctx;
+  ASSERT_EQ(0, m_remote_image_ctx->operations->resize(size, true,
+                                                      no_op_progress_ctx));
+
+  C_SaferCond ctx;
+  ImageSync<> *request = create_request(&ctx);
+  request->send();
+  ASSERT_EQ(0, ctx.wait());
+
+  bufferlist read_remote_bl;
+  read_remote_bl.append(std::string(len, '\0'));
+  bufferlist read_local_bl;
+  read_local_bl.append(std::string(len, '\0'));
+
+  ASSERT_LE(0, m_remote_image_ctx->aio_work_queue->read(
+              off, len, read_remote_bl.c_str(), 0));
+  ASSERT_LE(0, m_local_image_ctx->aio_work_queue->read(
+              off, len, read_local_bl.c_str(), 0));
+
+  ASSERT_TRUE(read_remote_bl.contents_equal(read_local_bl));
+}
+
+TEST_F(TestImageSync, Discard) {
+  int64_t object_size = std::min<int64_t>(
+    m_remote_image_ctx->size, 1 << m_remote_image_ctx->order);
+
+  uint64_t off = 0;
+  uint64_t len = object_size / 10;
+
+  std::string str(len, '1');
+  ASSERT_EQ((int)len, m_remote_image_ctx->aio_work_queue->write(off, len,
+                                                                str.c_str(), 0));
+  {
+    RWLock::RLocker owner_locker(m_remote_image_ctx->owner_lock);
+    ASSERT_EQ(0, m_remote_image_ctx->flush());
+  }
+
+  ASSERT_EQ(0, create_snap(m_remote_image_ctx, "snap", nullptr));
+
+  ASSERT_EQ((int)len - 2, m_remote_image_ctx->aio_work_queue->discard(off + 1,
+                                                                      len - 2));
+  {
+    RWLock::RLocker owner_locker(m_remote_image_ctx->owner_lock);
+    ASSERT_EQ(0, m_remote_image_ctx->flush());
+  }
+
+  C_SaferCond ctx;
+  ImageSync<> *request = create_request(&ctx);
+  request->send();
+  ASSERT_EQ(0, ctx.wait());
+
+  bufferlist read_remote_bl;
+  read_remote_bl.append(std::string(object_size, '\0'));
+  bufferlist read_local_bl;
+  read_local_bl.append(std::string(object_size, '\0'));
+
+  ASSERT_LE(0, m_remote_image_ctx->aio_work_queue->read(
+              off, len, read_remote_bl.c_str(), 0));
+  ASSERT_LE(0, m_local_image_ctx->aio_work_queue->read(
+              off, len, read_local_bl.c_str(), 0));
+
+  ASSERT_TRUE(read_remote_bl.contents_equal(read_local_bl));
 }
 
 TEST_F(TestImageSync, SnapshotStress) {

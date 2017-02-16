@@ -95,6 +95,7 @@ BuildRequires:	checkpolicy
 BuildRequires:	selinux-policy-devel
 BuildRequires:	/usr/share/selinux/devel/policyhelp
 %endif
+BuildRequires:	bc
 BuildRequires:	boost-devel
 %if ! 0%{?suse_version}
 BuildRequires:	boost-python
@@ -571,7 +572,9 @@ Summary:	Python 2 libraries for Ceph distributed file system
 Group:		System Environment/Libraries
 License:	LGPL-2.0
 Requires:	libcephfs2 = %{epoch}:%{version}-%{release}
-Requires:	python-rados = %{epoch}:%{version}-%{release}
+%if 0%{?suse_version}
+Recommends: python-rados = %{epoch}:%{version}-%{release}
+%endif
 Obsoletes:	python-ceph < %{epoch}:%{version}-%{release}
 %description -n python-cephfs
 This package contains Python 2 libraries for interacting with Cephs distributed
@@ -701,6 +704,8 @@ export CPPFLAGS="$java_inc"
 export CFLAGS="$RPM_OPT_FLAGS"
 export CXXFLAGS="$RPM_OPT_FLAGS"
 
+env | sort
+
 mkdir build
 cd build
 cmake .. \
@@ -711,6 +716,7 @@ cmake .. \
     -DCMAKE_INSTALL_SYSCONFDIR=%{_sysconfdir} \
     -DCMAKE_INSTALL_MANDIR=%{_mandir} \
     -DCMAKE_INSTALL_DOCDIR=%{_docdir}/ceph \
+    -DWITH_EMBEDDED=OFF \
     -DWITH_MANPAGE=ON \
     -DWITH_PYTHON3=ON \
     -DWITH_SYSTEMD=ON \
@@ -1155,6 +1161,8 @@ fi
 %{_bindir}/ceph-fuse
 %{_mandir}/man8/ceph-fuse.8*
 %{_sbindir}/mount.fuse.ceph
+%{_unitdir}/ceph-fuse@.service
+%{_unitdir}/ceph-fuse.target
 
 %files -n rbd-fuse
 %defattr(-,root,root,-)
@@ -1348,6 +1356,8 @@ fi
 %files -n librados2
 %defattr(-,root,root,-)
 %{_libdir}/librados.so.*
+%dir %{_libdir}/ceph
+%{_libdir}/ceph/libceph-common.so*
 %if %{with lttng}
 %{_libdir}/librados_tp.so.*
 %endif

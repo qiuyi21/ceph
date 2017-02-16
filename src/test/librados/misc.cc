@@ -9,16 +9,15 @@
 #include "include/rados/librados.hpp"
 #include "include/stringify.h"
 #include "global/global_context.h"
-#include "global/global_init.h"
-#include "common/ceph_argparse.h"
-#include "common/common_init.h"
 #include "test/librados/test.h"
 #include "test/librados/TestCase.h"
+#include "gtest/gtest.h"
 
 #include <errno.h>
 #include <map>
 #include <sstream>
 #include <string>
+
 
 using namespace librados;
 using std::map;
@@ -71,6 +70,67 @@ TEST(LibRadosMiscConnectFailure, ConnectFailure) {
   ASSERT_NE(0, rados_connect(cluster));
 
   rados_shutdown(cluster);
+}
+
+TEST(LibRadosMiscPool, PoolCreationRace) {
+  rados_t cluster_a, cluster_b;
+
+  char *id = getenv("CEPH_CLIENT_ID");
+  if (id)
+    std::cerr << "Client id is: " << id << std::endl;
+
+  ASSERT_EQ(0, rados_create(&cluster_a, NULL));
+  ASSERT_EQ(0, rados_conf_read_file(cluster_a, NULL));
+  // kludge: i want to --log-file foo and only get cluster b
+  //ASSERT_EQ(0, rados_conf_parse_env(cluster_a, NULL));
+  ASSERT_EQ(0, rados_connect(cluster_a));
+
+  ASSERT_EQ(0, rados_create(&cluster_b, NULL));
+  ASSERT_EQ(0, rados_conf_read_file(cluster_b, NULL));
+  ASSERT_EQ(0, rados_conf_parse_env(cluster_b, NULL));
+  ASSERT_EQ(0, rados_conf_set(cluster_b,
+			      "objecter_debug_inject_relock_delay", "true"));
+  ASSERT_EQ(0, rados_connect(cluster_b));
+
+  char poolname[80];
+  snprintf(poolname, sizeof(poolname), "poolrace.%d", rand());
+  rados_pool_create(cluster_a, poolname);
+  rados_ioctx_t a, b;
+  rados_ioctx_create(cluster_a, poolname, &a);
+  int64_t poolid = rados_ioctx_get_id(a);
+
+  rados_ioctx_create2(cluster_b, poolid+1, &b);
+
+  char pool2name[80];
+  snprintf(pool2name, sizeof(pool2name), "poolrace2.%d", rand());
+  rados_pool_create(cluster_a, pool2name);
+
+  list<rados_completion_t> cls;
+  while (true) {
+    char buf[100];
+    rados_completion_t c;
+    rados_aio_create_completion(0, 0, 0, &c);
+    cls.push_back(c);
+    rados_aio_read(b, "PoolCreationRaceObj", c, buf, 100, 0);
+    cout << "started " << (void*)c << std::endl;
+    if (rados_aio_is_complete(cls.front())) {
+      break;
+    }
+  }
+  cout << " started " << cls.size() << " aios" << std::endl;
+  for (auto c : cls) {
+    cout << "waiting " << (void*)c << std::endl;
+    rados_aio_wait_for_complete_and_cb(c);
+    rados_aio_release(c);
+  }
+  cout << "done." << std::endl;
+
+  rados_ioctx_destroy(a);
+  rados_ioctx_destroy(b);
+  rados_pool_delete(cluster_a, poolname);
+  rados_pool_delete(cluster_a, pool2name);
+  rados_shutdown(cluster_b);
+  rados_shutdown(cluster_a);
 }
 
 TEST_F(LibRadosMisc, ClusterFSID) {
@@ -404,7 +464,7 @@ TEST_F(LibRadosMiscPP, Tmap2OmapPP) {
     map<string, bufferlist> m;
     ObjectReadOperation o;
     o.omap_get_header(&got, NULL);
-    o.omap_get_vals("", 1024, &m, NULL);
+    o.omap_get_vals2("", 1024, &m, nullptr, nullptr);
     ASSERT_EQ(0, ioctx.operate("foo", &o, NULL));
 
     // compare header
@@ -591,36 +651,12 @@ TEST_F(LibRadosMiscPP, AioOperatePP) {
   ASSERT_EQ(0, ioctx.aio_operate("foo", my_completion, &o));
   ASSERT_EQ(0, my_completion->wait_for_complete_and_cb());
   ASSERT_EQ(my_aio_complete, true);
+  my_completion->release();
 
   uint64_t size;
   time_t mtime;
   ASSERT_EQ(0, ioctx.stat("foo", &size, &mtime));
   ASSERT_EQ(1024U, size);
-}
-
-TEST_F(LibRadosMiscPP, CloneRangePP) {
-  char buf[64];
-  memset(buf, 0xcc, sizeof(buf));
-  bufferlist bl;
-  bl.append(buf, sizeof(buf));
-  ASSERT_EQ(0, ioctx.write("foo", bl, sizeof(buf), 0));
-  ioctx.locator_set_key("foo");
-  ASSERT_EQ(0, ioctx.clone_range("bar", 0, "foo", 0, sizeof(buf)));
-  bufferlist bl2;
-  ASSERT_EQ(sizeof(buf), (size_t)ioctx.read("bar", bl2, sizeof(buf), 0));
-  ASSERT_EQ(0, memcmp(buf, bl2.c_str(), sizeof(buf)));
-}
-
-TEST_F(LibRadosMisc, CloneRange) {
-  char buf[128];
-  memset(buf, 0xcc, sizeof(buf));
-  ASSERT_EQ(0, rados_write(ioctx, "src", buf, sizeof(buf), 0));
-  rados_ioctx_locator_set_key(ioctx, "src");
-  ASSERT_EQ(0, rados_clone_range(ioctx, "dst", 0, "src", 0, sizeof(buf)));
-  char buf2[sizeof(buf)];
-  memset(buf2, 0, sizeof(buf2));
-  ASSERT_EQ((int)sizeof(buf2), rados_read(ioctx, "dst", buf2, sizeof(buf2), 0));
-  ASSERT_EQ(0, memcmp(buf, buf2, sizeof(buf)));
 }
 
 TEST_F(LibRadosMiscPP, AssertExistsPP) {
@@ -791,7 +827,7 @@ class LibRadosTwoPoolsECPP : public RadosTestECPP
 {
 public:
   LibRadosTwoPoolsECPP() {};
-  virtual ~LibRadosTwoPoolsECPP() {};
+  ~LibRadosTwoPoolsECPP() {};
 protected:
   static void SetUpTestCase() {
     pool_name = get_temp_pool_name();
@@ -805,12 +841,12 @@ protected:
   }
   static std::string src_pool_name;
 
-  virtual void SetUp() {
+  void SetUp() override {
     RadosTestECPP::SetUp();
     ASSERT_EQ(0, cluster.ioctx_create(src_pool_name.c_str(), src_ioctx));
     src_ioctx.set_namespace(nspace);
   }
-  virtual void TearDown() {
+  void TearDown() override {
     // wait for maps to settle before next test
     cluster.wait_for_latest_osdmap();
 
@@ -1014,17 +1050,4 @@ TEST_F(LibRadosMisc, WriteSame) {
 	    rados_writesame(ioctx, "ws", buf, 0, sizeof(buf), 0));
   /* write_len = data_len, i.e. same as rados_write() */
   ASSERT_EQ(0, rados_writesame(ioctx, "ws", buf, sizeof(buf), sizeof(buf), 0));
-}
-
-int main(int argc, char **argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-
-  vector<const char*> args;
-  argv_to_vec(argc, (const char **)argv, args);
-
-  global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY, 0);
-  common_init_finish(g_ceph_context);
-
-  return RUN_ALL_TESTS();
 }

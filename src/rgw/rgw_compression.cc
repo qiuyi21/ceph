@@ -64,8 +64,7 @@ RGWGetObj_Decompress::RGWGetObj_Decompress(CephContext* cct_,
 {
   compressor = Compressor::create(cct, cs_info->compression_type);
   if (!compressor.get())
-    lderr(cct) << "Cannot load compressor of type " << cs_info->compression_type 
-                     << " for rgw, check rgw_compression_type config option" << dendl;
+    lderr(cct) << "Cannot load compressor of type " << cs_info->compression_type << dendl;
 }
 
 int RGWGetObj_Decompress::handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len)
@@ -74,8 +73,7 @@ int RGWGetObj_Decompress::handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len
 
   if (!compressor.get()) {
     // if compressor isn't available - error, because cannot return decompressed data?
-    lderr(cct) << "Cannot load compressor of type " << cs_info->compression_type 
-                     << " for rgw, check rgw_compression_type config option" << dendl;
+    lderr(cct) << "Cannot load compressor of type " << cs_info->compression_type << dendl;
     return -EIO;
   }
   bufferlist out_bl, in_bl;
@@ -109,7 +107,7 @@ int RGWGetObj_Decompress::handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len
       tmp_out.copy(0, q_len, out_bl);
     else
       out_bl.append(tmp_out);
-    first_block++;
+    ++first_block;
   }
 
   if (first_data && partial_content && out_bl.length() != 0)

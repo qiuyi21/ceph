@@ -528,7 +528,9 @@ EOF
 		fi
 		if [ "$cephx" -eq 1 ] ; then
 			wconf <<EOF
-        auth supported = cephx
+        auth cluster required = cephx
+        auth service required = cephx
+        auth client required = cephx
 EOF
 		else
 			wconf <<EOF
@@ -699,23 +701,21 @@ EOF
 fi
 
 if [ "$start_mds" -eq 1 -a "$CEPH_NUM_MDS" -gt 0 ]; then
-    if [ "$CEPH_NUM_FS" -gt "1" ] ; then
-        ceph_adm fs flag set enable_multiple true --yes-i-really-mean-it
-    fi
-
-    fs=0
-    for name in a b c d e f g h i j k l m n o p
-    do
-        ceph_adm osd pool create "cephfs_data_${name}" 8
-        ceph_adm osd pool create "cephfs_metadata_${name}" 8
-        ceph_adm fs new "cephfs_${name}" "cephfs_metadata_${name}" "cephfs_data_${name}"
-        if [ "$CEPH_MAX_MDS" -gt 1 ]; then
-            ceph_adm fs set "cephfs_${name}" allow_multimds true --yes-i-really-mean-it
-            ceph_adm fs set "cephfs_${name}" max_mds "$CEPH_MAX_MDS"
+    if [ "$CEPH_NUM_FS" -gt "0" ] ; then
+        if [ "$CEPH_NUM_FS" -gt "1" ] ; then
+            ceph_adm fs flag set enable_multiple true --yes-i-really-mean-it
         fi
-        fs=$(($fs + 1))
-        [ $fs -eq $CEPH_NUM_FS ] && break
-    done
+
+        fs=0
+        for name in a b c d e f g h i j k l m n o p
+        do
+            ceph_adm osd pool create "cephfs_data_${name}" 8
+            ceph_adm osd pool create "cephfs_metadata_${name}" 8
+            ceph_adm fs new "cephfs_${name}" "cephfs_metadata_${name}" "cephfs_data_${name}"
+            fs=$(($fs + 1))
+            [ $fs -eq $CEPH_NUM_FS ] && break
+        done
+    fi
 
     mds=0
     for name in a b c d e f g h i j k l m n o p
@@ -760,6 +760,22 @@ EOF
 #ceph_adm mds set max_mds 2
     done
 fi
+
+# Don't set max_mds until all the daemons are started, otherwise
+# the intended standbys might end up in active roles.
+if [ "$CEPH_MAX_MDS" -gt 1 ]; then
+    sleep 5  # wait for daemons to make it into FSMap before increasing max_mds
+fi
+fs=0
+for name in a b c d e f g h i j k l m n o p
+do
+    if [ "$CEPH_MAX_MDS" -gt 1 ]; then
+        ceph_adm fs set "cephfs_${name}" allow_multimds true --yes-i-really-mean-it
+        ceph_adm fs set "cephfs_${name}" max_mds "$CEPH_MAX_MDS"
+    fi
+    fs=$(($fs + 1))
+    [ $fs -eq $CEPH_NUM_FS ] && break
+done
 
 if [ "$CEPH_NUM_MGR" -gt 0 ]; then
     mgr=0

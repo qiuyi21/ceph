@@ -96,7 +96,7 @@ static void wait_shutdown()
   }
 }
 
-int signal_fd_init()
+static int signal_fd_init()
 {
   return socketpair(AF_UNIX, SOCK_STREAM, 0, signal_fd);
 }
@@ -110,7 +110,9 @@ static void signal_fd_finalize()
 static void handle_sigterm(int signum)
 {
   dout(1) << __func__ << dendl;
+#if defined(WITH_RADOSGW_FCGI_FRONTEND)
   FCGX_ShutdownPending();
+#endif
 
   // send a signal to make fcgi's accept(2) wake up.  unfortunately the
   // initial signal often isn't sufficient because we race with accept's
@@ -147,13 +149,13 @@ static void check_curl()
 class C_InitTimeout : public Context {
 public:
   C_InitTimeout() {}
-  void finish(int r) {
+  void finish(int r) override {
     derr << "Initialization timeout, failed to initialize" << dendl;
     exit(1);
   }
 };
 
-int usage()
+static int usage()
 {
   cerr << "usage: radosgw [options...]" << std::endl;
   cerr << "options:\n";
@@ -175,9 +177,6 @@ static RGWRESTMgr *set_logging(RGWRESTMgr *mgr)
   return mgr;
 }
 
-void intrusive_ptr_add_ref(CephContext* cct) { cct->get(); }
-void intrusive_ptr_release(CephContext* cct) { cct->put(); }
-
 RGWRealmReloader *preloader = NULL;
 
 static void reloader_handler(int signum)
@@ -190,11 +189,14 @@ static void reloader_handler(int signum)
   sighup_handler(signum);
 }
 
-
 /*
  * start up the RADOS connection and then handle HTTP messages as they come in
  */
+#ifdef BUILDING_FOR_EMBEDDED
+extern "C" int cephd_rgw(int argc, const char **argv)
+#else
 int main(int argc, const char **argv)
+#endif
 {
   // dout() messages will be sent to stderr, but FCGX wants messages on stdout
   // Redirect stderr to stdout.
@@ -248,6 +250,7 @@ int main(int argc, const char **argv)
     RGWFrontendConfig *config = new RGWFrontendConfig(f);
     int r = config->init();
     if (r < 0) {
+      delete config;
       cerr << "ERROR: failed to init config: " << f << std::endl;
       return EINVAL;
     }
@@ -261,8 +264,10 @@ int main(int argc, const char **argv)
   // Now that we've determined which frontend(s) to use, continue with global
   // initialization. Passing false as the final argument ensures that
   // global_pre_init() is not invoked twice.
-  global_init(&def_args, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_DAEMON,
-          flags, "rgw_data", false);
+  // claim the reference and release it after subsequent destructors have fired
+  auto cct = global_init(&def_args, args, CEPH_ENTITY_TYPE_CLIENT,
+			 CODE_ENVIRONMENT_DAEMON,
+			 flags, "rgw_data", false);
 
   for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ++i) {
     if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
@@ -285,6 +290,11 @@ int main(int argc, const char **argv)
     }
   }
 
+  // for region -> zonegroup conversion (must happen before common_init_finish())
+  if (!g_conf->rgw_region.empty() && g_conf->rgw_zonegroup.empty()) {
+    g_conf->set_val_or_die("rgw_zonegroup", g_conf->rgw_region.c_str());
+  }
+
   check_curl();
 
   if (g_conf->daemonize) {
@@ -302,9 +312,6 @@ int main(int argc, const char **argv)
 
   common_init_finish(g_ceph_context);
 
-  // claim the reference and release it after subsequent destructors have fired
-  boost::intrusive_ptr<CephContext> cct(g_ceph_context, false);
-
   int r = rgw_tools_init(g_ceph_context);
   if (r < 0) {
     derr << "ERROR: unable to initialize rgw tools" << dendl;
@@ -315,7 +322,9 @@ int main(int argc, const char **argv)
   
   curl_global_init(CURL_GLOBAL_ALL);
   
+#if defined(WITH_RADOSGW_FCGI_FRONTEND)
   FCGX_Init();
+#endif
 
   RGWRados *store = RGWStoreManager::get_storage(g_ceph_context,
       g_conf->rgw_enable_gc_threads, g_conf->rgw_enable_lc_threads, g_conf->rgw_enable_quota_threads,
@@ -420,6 +429,9 @@ int main(int argc, const char **argv)
     rest.register_resource(g_conf->rgw_admin_entry, admin_resource);
   }
 
+  /* Header custom behavior */
+  rest.register_x_headers(g_conf->rgw_log_http_headers);
+
   OpsLogSocket *olog = NULL;
 
   if (!g_conf->rgw_ops_log_socket_path.empty()) {
@@ -446,35 +458,19 @@ int main(int argc, const char **argv)
        fiter != fe_map.end(); ++fiter) {
     RGWFrontendConfig *config = fiter->second;
     string framework = config->get_framework();
-    RGWFrontend *fe;
-#if defined(WITH_RADOSGW_ASIO_FRONTEND)
-    if ((framework == "asio") &&
-	cct->check_experimental_feature_enabled("rgw-asio-frontend")) {
-      int port;
-      config->get_val("port", 80, &port);
-      std::string uri_prefix;
-      config->get_val("prefix", "", &uri_prefix);
-      RGWProcessEnv env{ store, &rest, olog, port, uri_prefix };
-      fe = new RGWAsioFrontend(env);
-    } else if (framework == "fastcgi" || framework == "fcgi") {
-#else
-    if (framework == "fastcgi" || framework == "fcgi") {
-#endif /* WITH_RADOSGW_ASIO_FRONTEND */
-      std::string uri_prefix;
-      config->get_val("prefix", "", &uri_prefix);
-      RGWProcessEnv fcgi_pe = { store, &rest, olog, 0, uri_prefix };
+    RGWFrontend *fe = NULL;
 
-      fe = new RGWFCGXFrontend(fcgi_pe, config);
-    } else if (framework == "civetweb" || framework == "mongoose") {
+    if (framework == "civetweb" || framework == "mongoose") {
       int port;
       config->get_val("port", 80, &port);
       std::string uri_prefix;
       config->get_val("prefix", "", &uri_prefix);
 
-      RGWProcessEnv env = { store, &rest, olog, port, uri_prefix };
+      RGWProcessEnv env = { store, &rest, olog, 0, uri_prefix };
 
       fe = new RGWCivetWebFrontend(env, config);
-    } else if (framework == "loadgen") {
+    }
+    else if (framework == "loadgen") {
       int port;
       config->get_val("port", 80, &port);
       std::string uri_prefix;
@@ -483,10 +479,33 @@ int main(int argc, const char **argv)
       RGWProcessEnv env = { store, &rest, olog, port, uri_prefix };
 
       fe = new RGWLoadGenFrontend(env, config);
-    } else {
+    }
+#if defined(WITH_RADOSGW_ASIO_FRONTEND)
+    else if ((framework == "asio") &&
+	cct->check_experimental_feature_enabled("rgw-asio-frontend")) {
+      int port;
+      config->get_val("port", 80, &port);
+      std::string uri_prefix;
+      config->get_val("prefix", "", &uri_prefix);
+      RGWProcessEnv env{ store, &rest, olog, port, uri_prefix };
+      fe = new RGWAsioFrontend(env);
+    }
+#endif /* WITH_RADOSGW_ASIO_FRONTEND */
+#if defined(WITH_RADOSGW_FCGI_FRONTEND)
+    else if (framework == "fastcgi" || framework == "fcgi") {
+      std::string uri_prefix;
+      config->get_val("prefix", "", &uri_prefix);
+      RGWProcessEnv fcgi_pe = { store, &rest, olog, 0, uri_prefix };
+
+      fe = new RGWFCGXFrontend(fcgi_pe, config);
+    }
+#endif /* WITH_RADOSGW_FCGI_FRONTEND */
+
+    if (fe == NULL) {
       dout(0) << "WARNING: skipping unknown framework: " << framework << dendl;
       continue;
     }
+
     dout(0) << "starting handler: " << fiter->first << dendl;
     int r = fe->init();
     if (r < 0) {

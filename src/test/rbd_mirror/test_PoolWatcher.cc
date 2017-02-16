@@ -1,4 +1,4 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
@@ -86,7 +86,7 @@ TestPoolWatcher() : m_lock("TestPoolWatcherLock"),
 
   void create_image(const string &pool_name, bool mirrored=true,
 		    string *image_name=nullptr) {
-    uint64_t features = librbd::util::parse_rbd_default_features(g_ceph_context);
+    uint64_t features = librbd::util::get_rbd_default_features(g_ceph_context);
     string name = "image" + stringify(++m_image_number);
     if (mirrored) {
       features |= RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_JOURNALING;
@@ -128,14 +128,14 @@ TestPoolWatcher() : m_lock("TestPoolWatcherLock"),
     {
       librbd::ImageCtx *ictx = new librbd::ImageCtx(parent_image_name.c_str(),
 						    "", "", pioctx, false);
-      ictx->state->open();
+      ictx->state->open(false);
       EXPECT_EQ(0, ictx->operations->snap_create(snap_name.c_str(),
 						 cls::rbd::UserSnapshotNamespace()));
       EXPECT_EQ(0, ictx->operations->snap_protect(snap_name.c_str()));
       ictx->state->close();
     }
 
-    uint64_t features = librbd::util::parse_rbd_default_features(g_ceph_context);
+    uint64_t features = librbd::util::get_rbd_default_features(g_ceph_context);
     string name = "clone" + stringify(++m_image_number);
     if (mirrored) {
       features |= RBD_FEATURE_EXCLUSIVE_LOCK | RBD_FEATURE_JOURNALING;

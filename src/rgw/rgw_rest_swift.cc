@@ -31,10 +31,12 @@
 
 #include <boost/utility/string_ref.hpp>
 
+#define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
 int RGWListBuckets_ObjStore_SWIFT::get_params()
 {
+  prefix = s->info.args.get("prefix");
   marker = s->info.args.get("marker");
   end_marker = s->info.args.get("end_marker");
 
@@ -79,7 +81,7 @@ static void dump_account_metadata(struct req_state * const s,
                                   const RGWAccessControlPolicy_SWIFTAcct &policy)
 {
   /* Adding X-Timestamp to keep align with Swift API */
-  dump_header(s, "X-Timestamp", ceph_clock_now(g_ceph_context));
+  dump_header(s, "X-Timestamp", ceph_clock_now());
 
   dump_header(s, "X-Account-Container-Count", buckets_count);
   dump_header(s, "X-Account-Object-Count", buckets_object_count);
@@ -145,7 +147,7 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_begin(bool has_buckets)
     set_req_state_err(s, op_ret);
   }
 
-  if (!g_conf->rgw_swift_enforce_content_length) {
+  if (! s->cct->_conf->rgw_swift_enforce_content_length) {
     /* Adding account stats in the header to keep align with Swift API */
     dump_account_metadata(s,
             buckets_count,
@@ -170,14 +172,20 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_begin(bool has_buckets)
 
 void RGWListBuckets_ObjStore_SWIFT::send_response_data(RGWUserBuckets& buckets)
 {
-  map<string, RGWBucketEnt>& m = buckets.get_buckets();
-  map<string, RGWBucketEnt>::iterator iter;
-
-  if (!sent_data)
+  if (! sent_data) {
     return;
+  }
 
-  for (iter = m.begin(); iter != m.end(); ++iter) {
-    RGWBucketEnt obj = iter->second;
+  /* Take care of the prefix parameter of Swift API. There is no business
+   * in applying the filter earlier as we really need to go through all
+   * entries regardless of it (the headers like X-Account-Container-Count
+   * aren't affected by specifying prefix). */
+  const std::map<std::string, RGWBucketEnt>& m = buckets.get_buckets();
+  for (auto iter = m.lower_bound(prefix);
+       iter != m.end() && boost::algorithm::starts_with(iter->first, prefix);
+       ++iter) {
+    const RGWBucketEnt& obj = iter->second;
+
     s->formatter->open_object_section("container");
     s->formatter->dump_string("name", obj.bucket.name);
     if (need_stats) {
@@ -185,7 +193,7 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_data(RGWUserBuckets& buckets)
       s->formatter->dump_int("bytes", obj.size);
     }
     s->formatter->close_section();
-    if (!g_conf->rgw_swift_enforce_content_length) {
+    if (! s->cct->_conf->rgw_swift_enforce_content_length) {
       rgw_flush_formatter(s, s->formatter);
     }
   }
@@ -197,7 +205,7 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_end()
     s->formatter->close_section();
   }
 
-  if (g_conf->rgw_swift_enforce_content_length) {
+  if (s->cct->_conf->rgw_swift_enforce_content_length) {
     /* Adding account stats in the header to keep align with Swift API */
     dump_account_metadata(s,
             buckets_count,
@@ -211,7 +219,7 @@ void RGWListBuckets_ObjStore_SWIFT::send_response_end()
     end_header(s, NULL, NULL, s->formatter->get_len(), true);
   }
 
-  if (sent_data || g_conf->rgw_swift_enforce_content_length) {
+  if (sent_data || s->cct->_conf->rgw_swift_enforce_content_length) {
     rgw_flush_formatter_and_reset(s, s->formatter);
   }
 }
@@ -510,13 +518,13 @@ static int get_swift_container_settings(req_state * const s,
 
   if (read_attr || write_attr) {
     RGWAccessControlPolicy_SWIFT swift_policy(s->cct);
-    const bool r = swift_policy.create(store,
-                                s->user->user_id,
-                                s->user->display_name,
-                                read_list,
-                                write_list);
-    if (r != true) {
-      return -EINVAL;
+    const auto r = swift_policy.create(store,
+                                       s->user->user_id,
+                                       s->user->display_name,
+                                       read_list,
+                                       write_list);
+    if (r < 0) {
+      return r;
     }
 
     *policy = swift_policy;
@@ -595,8 +603,7 @@ static int get_swift_versioning_settings(
     swift_ver_location = boost::in_place(std::string());
   }
 
-  std::string vloc = s->info.env->get("HTTP_X_VERSIONS_LOCATION", "");
-  if (vloc.size()) {
+  if (s->info.env->exists("HTTP_X_VERSIONS_LOCATION")) {
     /* If the Swift's versioning is globally disabled but someone wants to
      * enable it for a given container, new version of Swift will generate
      * the precondition failed error. */
@@ -604,7 +611,7 @@ static int get_swift_versioning_settings(
       return -ERR_PRECONDITION_FAILED;
     }
 
-    swift_ver_location = std::move(vloc);
+    swift_ver_location = s->info.env->get("HTTP_X_VERSIONS_LOCATION", "");
   }
 
   return 0;
@@ -1214,6 +1221,20 @@ void RGWCopyObj_ObjStore_SWIFT::send_response()
   }
 }
 
+int RGWGetObj_ObjStore_SWIFT::verify_permission()
+{
+  op_ret = RGWGetObj_ObjStore::verify_permission();
+
+  /* We have to differentiate error codes depending on whether user is
+   * anonymous (401 Unauthorized) or he doesn't have necessary permissions
+   * (403 Forbidden). */
+  if (s->auth_identity->is_anonymous() && op_ret == -EACCES) {
+    return -EPERM;
+  } else {
+    return op_ret;
+  }
+}
+
 int RGWGetObj_ObjStore_SWIFT::get_params()
 {
   const string& mm = s->info.args.get("multipart-manifest");
@@ -1538,7 +1559,7 @@ void RGWInfo_ObjStore_SWIFT::list_slo_data(Formatter& formatter,
 bool RGWInfo_ObjStore_SWIFT::is_expired(const std::string& expires, CephContext* cct)
 {
   string err;
-  const utime_t now = ceph_clock_now(cct);
+  const utime_t now = ceph_clock_now();
   const uint64_t expiration = (uint64_t)strict_strtoll(expires.c_str(),
                                                        10, &err);
   if (!err.empty()) {
@@ -2107,7 +2128,7 @@ int RGWHandler_REST_SWIFT::authorize()
     }
 
     /* FIXME(rzarzynski): move into separated RGWAuthApplier decorator. */
-    if (s->user->system) {
+    if (s->user->system && s->auth_identity->is_owner_of(s->user->user_id)) {
       s->system_request = true;
       ldout(s->cct, 20) << "system request over Swift API" << dendl;
 
