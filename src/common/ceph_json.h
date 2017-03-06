@@ -78,6 +78,7 @@ public:
 
   bool is_array();
   bool is_object();
+  Value_type get_data_type();
   vector<string> get_array_elements();
 };
 
@@ -98,6 +99,7 @@ public:
 
   const char *get_json() { return json_buffer.c_str(); }
   void set_failure() { success = false; }
+  bool is_success() { return success; }
 };
 
 

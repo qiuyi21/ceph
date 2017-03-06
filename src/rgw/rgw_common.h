@@ -35,6 +35,7 @@
 #include "rgw_quota.h"
 #include "rgw_string.h"
 #include "rgw_website.h"
+#include "rgw_bucket_policy_s3.h"
 #include "cls/version/cls_version_types.h"
 #include "cls/user/cls_user_types.h"
 #include "cls/rgw/cls_rgw_types.h"
@@ -61,6 +62,7 @@ using ceph::crypto::MD5;
 #define RGW_SYS_PARAM_PREFIX "rgwx-"
 
 #define RGW_ATTR_ACL		RGW_ATTR_PREFIX "acl"
+#define RGW_ATTR_POLICY     RGW_ATTR_PREFIX "policy"
 #define RGW_ATTR_CORS		RGW_ATTR_PREFIX "cors"
 #define RGW_ATTR_ETAG    	RGW_ATTR_PREFIX "etag"
 #define RGW_ATTR_BUCKETS	RGW_ATTR_PREFIX "buckets"
@@ -181,6 +183,8 @@ using ceph::crypto::MD5;
 #define ERR_WEBSITE_REDIRECT     2038
 #define ERR_NO_SUCH_WEBSITE_CONFIGURATION 2039
 #define ERR_AMZ_CONTENT_SHA256_MISMATCH 2040
+#define ERR_NO_SUCH_BUCKET_POLICY 2041
+#define ERR_MALFORMED_POLICY     2042
 #define ERR_USER_SUSPENDED       2100
 #define ERR_INTERNAL_ERROR       2200
 #define ERR_NOT_IMPLEMENTED      2201
@@ -422,6 +426,9 @@ enum RGWOpType {
   RGW_OP_DELETE_MULTI_OBJ,
   RGW_OP_BULK_DELETE,
   RGW_OP_SET_ATTRS,
+  RGW_OP_GET_BUCKET_POLICY,
+  RGW_OP_PUT_BUCKET_POLICY,
+  RGW_OP_DELETE_BUCKET_POLICY,
 
   /* rgw specific */
   RGW_OP_ADMIN_SET_METADATA
@@ -1270,6 +1277,7 @@ struct req_state {
 
   RGWAccessControlPolicy *bucket_acl;
   RGWAccessControlPolicy *object_acl;
+  RGWBucketPolicy bucket_policy;
 
   bool system_request;
 

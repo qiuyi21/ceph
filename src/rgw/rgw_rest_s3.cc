@@ -2113,7 +2113,7 @@ int RGWCopyObj_ObjStore_S3::init_dest_policy()
 
 int RGWCopyObj_ObjStore_S3::get_params()
 {
-  if (s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_RANGE")) {
+  if (s->info.env->get("HTTP_X_AMZ_COPY_SOURCE_RANGE") || !s->info.args.get("uploadId").empty()) {
     return -ERR_NOT_IMPLEMENTED;
   }
 
@@ -2264,6 +2264,42 @@ void RGWPutACLs_ObjStore_S3::send_response()
   dump_errno(s);
   end_header(s, this, "application/xml");
   dump_start(s);
+}
+
+void RGWPutBucketPolicy_ObjStore_S3::send_response() {
+  int r = op_ret;
+  if (!r)
+    r = STATUS_NO_CONTENT;
+
+  set_req_state_err(s, r);
+  dump_errno(s);
+  end_header(s, NULL);
+}
+
+void RGWGetBucketPolicy_ObjStore_S3::send_response() {
+  int r = op_ret;
+  if (r) {
+    if (r == -ENOENT)
+      r = ERR_NO_SUCH_BUCKET_POLICY;
+    set_req_state_err(s, r);
+  }
+
+  dump_errno(s);
+  end_header(s, this, "application/json");
+  dump_start(s);
+  if (!r) {
+    STREAM_IO(s)->write(policy.c_str(), policy.size());
+  }
+}
+
+void RGWDelBucketPolicy_ObjStore_S3::send_response() {
+  int r = op_ret;
+  if (!r || r == -ENOENT)
+    r = STATUS_NO_CONTENT;
+
+  set_req_state_err(s, r);
+  dump_errno(s);
+  end_header(s, NULL);
 }
 
 void RGWGetCORS_ObjStore_S3::send_response()
@@ -2810,6 +2846,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_get()
     return new RGWGetBucketWebsite_ObjStore_S3;
   }
 
+  if (s->info.args.sub_resource_exists("policy"))
+    return s->cct->_conf->rgw_enable_bucket_policy ? new RGWGetBucketPolicy_ObjStore_S3 : NULL;
+
   if (is_acl_op()) {
     return new RGWGetACLs_ObjStore_S3;
   } else if (is_cors_op()) {
@@ -2844,6 +2883,8 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_put()
     }
     return new RGWSetBucketWebsite_ObjStore_S3;
   }
+  if (s->info.args.sub_resource_exists("policy"))
+    return s->cct->_conf->rgw_enable_bucket_policy ? new RGWPutBucketPolicy_ObjStore_S3 : NULL;
   if (is_acl_op()) {
     return new RGWPutACLs_ObjStore_S3;
   } else if (is_cors_op()) {
@@ -2866,6 +2907,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_delete()
     }
     return new RGWDeleteBucketWebsite_ObjStore_S3;
   }
+
+  if (s->info.args.sub_resource_exists("policy"))
+    return s->cct->_conf->rgw_enable_bucket_policy ? new RGWDelBucketPolicy_ObjStore_S3 : NULL;
 
   return new RGWDeleteBucket_ObjStore_S3;
 }

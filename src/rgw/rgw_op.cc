@@ -28,6 +28,7 @@
 #include "rgw_rest_conn.h"
 #include "rgw_rest_s3.h"
 #include "rgw_client_io.h"
+#include "rgw_bucket_policy_s3.h"
 
 #include "include/assert.h"
 
@@ -193,6 +194,24 @@ static int get_obj_policy_from_attr(CephContext *cct, RGWRados *store, RGWObject
   return ret;
 }
 
+static int get_s3_bucket_policy_from_attr(CephContext *cct,
+    map<string, bufferlist>& bucket_attrs, RGWBucketPolicy& bktpol) {
+  map<string, bufferlist>::iterator aiter = bucket_attrs.find(RGW_ATTR_POLICY);
+
+  if (aiter != bucket_attrs.end()) {
+    bufferlist::iterator iter = aiter->second.begin();
+    try {
+      bktpol.decode(iter);
+    } catch (buffer::error& err) {
+      ldout(cct, 0) << "ERROR: could not decode bucket policy, caught buffer::error" << dendl;
+      return -EIO;
+    }
+    ldout(cct, 15) << "Read RGWBucketPolicy " << bktpol.tojson() << dendl;
+  }
+
+  return 0;
+}
+
 
 /**
  * Get the AccessControlPolicy for an object off of disk.
@@ -287,6 +306,9 @@ static int read_policy(RGWRados *store, struct req_state *s,
   } else if (ret == -ENOENT) {
       ret = -ERR_NO_SUCH_BUCKET;
   }
+
+  if (ret >= 0 && object.empty())
+    ret = get_s3_bucket_policy_from_attr(s->cct, bucket_attrs, s->bucket_policy);
 
   return ret;
 }
@@ -3260,6 +3282,8 @@ int RGWCopyObj::verify_permission()
   }
 
   src_bucket = src_bucket_info.bucket;
+  rgw_obj_key no_obj;
+  bool hasperm;
 
   /* get buckets info (source and dest) */
   if (s->local_source &&  source_zone.empty()) {
@@ -3273,10 +3297,38 @@ int RGWCopyObj::verify_permission()
     if (op_ret < 0)
       return op_ret;
 
-    if (!s->system_request && /* system request overrides permission checks */
-        !src_policy.verify_permission(s->user->user_id, s->perm_mask,
-				      RGW_PERM_READ))
-      return -EACCES;
+    if (!s->system_request) { /* system request overrides permission checks */
+
+      RGWAccessControlPolicy src_bucket_acl(s->cct);
+      op_ret = read_policy(store, s, src_bucket_info, src_attrs, &src_bucket_acl,
+          src_bucket, no_obj);
+      if (op_ret < 0)
+        return op_ret;
+
+      hasperm = false;
+      if (!s->bucket_policy.empty() && (s->perm_mask & RGW_PERM_READ)) {
+        switch (s->bucket_policy.verify_permission(s->user, RGW_OP_GET_OBJ,
+            src_bucket.name, src_object)) {
+        case RGW_POLICY_ALLOW:
+          if (s->cct->_conf->rgw_bucket_owner_share_any_by_policy
+              || !src_bucket_acl.get_owner().get_id().compare(
+                  src_policy.get_owner().get_id()))
+            hasperm = true;
+          break;
+        case RGW_POLICY_DENY:
+          if (s->user->user_id.compare(src_bucket_info.owner))
+            return -EACCES;
+          break;
+        default:
+          break;
+        }
+      }
+
+      if (!hasperm
+          && !src_policy.verify_permission(s->user->user_id, s->perm_mask,
+              RGW_PERM_READ))
+        return -EACCES;
+    }
   }
 
   RGWAccessControlPolicy dest_bucket_policy(s->cct);
@@ -3302,18 +3354,35 @@ int RGWCopyObj::verify_permission()
   rgw_obj dest_obj(dest_bucket, dest_object);
   store->set_atomic(s->obj_ctx, dest_obj);
 
-  rgw_obj_key no_obj;
-
   /* check dest bucket permissions */
   op_ret = read_policy(store, s, dest_bucket_info, dest_attrs,
 		       &dest_bucket_policy, dest_bucket, no_obj);
   if (op_ret < 0)
     return op_ret;
 
-  if (!s->system_request && /* system request overrides permission checks */
-      !dest_bucket_policy.verify_permission(s->user->user_id, s->perm_mask,
-					    RGW_PERM_WRITE))
-    return -EACCES;
+  if (!s->system_request) { /* system request overrides permission checks */
+
+    hasperm = false;
+    if (!s->bucket_policy.empty() && (s->perm_mask & RGW_PERM_WRITE)) {
+      switch (s->bucket_policy.verify_permission(s->user, RGW_OP_PUT_OBJ,
+          dest_bucket.name, dest_object)) {
+      case RGW_POLICY_ALLOW:
+        hasperm = true;
+        break;
+      case RGW_POLICY_DENY:
+        if (s->user->user_id.compare(dest_bucket_info.owner))
+          return -EACCES;
+        break;
+      default:
+        break;
+      }
+    }
+
+    if (!hasperm
+        && !dest_bucket_policy.verify_permission(s->user->user_id, s->perm_mask,
+            RGW_PERM_WRITE))
+      return -EACCES;
+  }
 
   op_ret = init_dest_policy();
   if (op_ret < 0)
@@ -4393,7 +4462,9 @@ void RGWListBucketMultiparts::execute()
 
 int RGWDeleteMultiObj::verify_permission()
 {
-  if (!verify_bucket_permission(s, RGW_PERM_WRITE))
+  can_bucket_wr = verify_bucket_permission(s, RGW_PERM_WRITE);
+  if ((s->bucket_policy.empty() || !(s->perm_mask & RGW_PERM_WRITE))
+      && !can_bucket_wr)
     return -EACCES;
 
   return 0;
@@ -4411,6 +4482,8 @@ void RGWDeleteMultiObj::execute()
   RGWMultiDelXMLParser parser;
   int num_processed = 0;
   RGWObjectCtx *obj_ctx = static_cast<RGWObjectCtx *>(s->obj_ctx);
+  uint8_t noperm;
+  string no_ver_id;
 
   op_ret = get_params();
   if (op_ret < 0) {
@@ -4449,6 +4522,28 @@ void RGWDeleteMultiObj::execute()
   for (iter = multi_delete->objects.begin();
         iter != multi_delete->objects.end() && num_processed < max_to_delete;
         ++iter, num_processed++) {
+    if (!s->bucket_policy.empty()) {
+      noperm = 1;
+      switch (s->bucket_policy.verify_permission(s->user, RGW_OP_DELETE_OBJ, s->bucket_name, *iter)) {
+      case RGW_POLICY_ALLOW:
+        noperm = 0;
+        break;
+      case RGW_POLICY_DENY:
+        if (s->user->user_id.compare(s->bucket_owner.get_id()))
+          noperm = 2;
+        break;
+      default:
+        break;
+      }
+    } else
+      noperm = can_bucket_wr ? 0 : 2;
+
+    if (noperm == 2 || (noperm && !can_bucket_wr)) {
+      op_ret = -EACCES;
+      send_partial_response(*iter, false, no_ver_id, op_ret);
+      continue;
+    }
+
     rgw_obj obj(bucket, *iter);
 
     obj_ctx->set_atomic(obj);
@@ -4715,6 +4810,114 @@ void RGWSetAttrs::execute()
     op_ret = rgw_bucket_set_attrs(store, s->bucket_info, s->bucket_attrs,
 				  &s->bucket_info.objv_tracker);
   }
+}
+
+int RGWPutBucketPolicy::verify_permission() {
+  if (s->user->user_id.compare(s->bucket_owner.get_id()) != 0)
+    return -EACCES;
+
+  return 0;
+}
+
+void RGWPutBucketPolicy::pre_exec() {
+  rgw_bucket_object_pre_exec(s);
+}
+
+void RGWPutBucketPolicy::execute() {
+  bufferlist bl;
+  rgw_obj obj;
+
+  op_ret = get_params();
+  if (op_ret < 0)
+    return;
+
+  if (!s->object.empty()) {
+    op_ret = -EPERM;
+    return;
+  }
+
+  ldout(s->cct, 15) << "read len=" << len << " data=" << (data ? data : "") << dendl;
+
+  if (!data || !data[0]
+      || !RGWBucketPolicy::is_valid_json(data, s->bucket_name)) {
+    op_ret = -ERR_MALFORMED_POLICY;
+    return;
+  }
+
+  RGWBucketPolicy(data).encode(bl);
+  obj = rgw_obj(s->bucket, s->object);
+  store->set_atomic(s->obj_ctx, obj);
+
+  map<string, bufferlist> attrs = s->bucket_attrs;
+  attrs[RGW_ATTR_POLICY] = bl;
+  op_ret = rgw_bucket_set_attrs(store, s->bucket_info, attrs,
+      &s->bucket_info.objv_tracker);
+}
+
+int RGWGetBucketPolicy::verify_permission() {
+  if (s->user->user_id.compare(s->bucket_owner.get_id()) != 0)
+    return -EACCES;
+
+  return 0;
+}
+
+void RGWGetBucketPolicy::pre_exec() {
+  rgw_bucket_object_pre_exec(s);
+}
+
+void RGWGetBucketPolicy::execute() {
+  if (!s->object.empty()) {
+    op_ret = -EPERM;
+    return;
+  }
+
+  if (!s->bucket_policy.empty())
+    policy = s->bucket_policy.tojson();
+  else
+    op_ret = -ENOENT;
+}
+
+int RGWDelBucketPolicy::verify_permission() {
+  if (s->user->user_id.compare(s->bucket_owner.get_id()) != 0)
+    return -EACCES;
+
+  return 0;
+}
+
+void RGWDelBucketPolicy::execute() {
+  bufferlist bl;
+  rgw_obj obj;
+
+  if (!s->object.empty()) {
+    op_ret = -EPERM;
+    return;
+  }
+
+  if (s->bucket_policy.empty()) {
+    dout(2) << "No bucket policy set yet for this bucket" << dendl;
+    op_ret = -ENOENT;
+    return;
+  }
+  store->get_bucket_instance_obj(s->bucket, obj);
+  store->set_atomic(s->obj_ctx, obj);
+
+  map<string, bufferlist> orig_attrs, attrs;
+  map<string, bufferlist>::iterator iter;
+
+  op_ret = get_system_obj_attrs(store, s, obj, orig_attrs, NULL, &s->bucket_info.objv_tracker);
+  if (op_ret < 0)
+    return;
+
+  for (iter = orig_attrs.begin(); iter != orig_attrs.end(); ++iter) {
+    const string& name = iter->first;
+    dout(10) << "DelBucketPolicy : attr: " << name << dendl;
+    if (name.compare(0, sizeof(RGW_ATTR_POLICY) - 1, RGW_ATTR_POLICY)
+        && attrs.find(name) == attrs.end()) {
+      attrs[name] = iter->second;
+    }
+  }
+
+  op_ret = rgw_bucket_set_attrs(store, s->bucket_info, attrs, &s->bucket_info.objv_tracker);
 }
 
 RGWHandler::~RGWHandler()

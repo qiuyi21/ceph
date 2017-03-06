@@ -1303,6 +1303,8 @@ public:
 
 
 class RGWDeleteMultiObj : public RGWOp {
+  bool can_bucket_wr;
+
 protected:
   int max_to_delete;
   size_t len;
@@ -1533,6 +1535,62 @@ public:
   virtual const string name() { return "set_attrs"; }
   virtual RGWOpType get_type() { return RGW_OP_SET_ATTRS; }
   virtual uint32_t op_mask() { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWPutBucketPolicy: public RGWOp {
+protected:
+  size_t len;
+  char *data;
+
+public:
+  RGWPutBucketPolicy() {
+    len = 0;
+    data = NULL;
+  }
+  ~RGWPutBucketPolicy() {
+    if (data) free(data);
+  }
+
+  int verify_permission();
+  void pre_exec();
+  void execute();
+
+  virtual int get_params() = 0;
+  virtual void send_response() = 0;
+  virtual const string name() { return "put_bucket_policy"; }
+  virtual RGWOpType get_type() { return RGW_OP_PUT_BUCKET_POLICY; }
+  virtual uint32_t op_mask() { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWGetBucketPolicy: public RGWOp {
+protected:
+  string policy;
+
+public:
+  RGWGetBucketPolicy() {}
+
+  int verify_permission();
+  void pre_exec();
+  void execute();
+
+  virtual void send_response() = 0;
+  virtual const string name() { return "get_bucket_policy"; }
+  virtual RGWOpType get_type() { return RGW_OP_GET_BUCKET_POLICY; }
+  virtual uint32_t op_mask() { return RGW_OP_TYPE_READ; }
+};
+
+class RGWDelBucketPolicy: public RGWOp {
+public:
+  RGWDelBucketPolicy() {}
+
+  int verify_permission();
+  void pre_exec() {}
+  void execute();
+
+  virtual void send_response() = 0;
+  virtual const string name() { return "del_bucket_policy"; }
+  virtual RGWOpType get_type(){ return RGW_OP_DELETE_BUCKET_POLICY; }
+  virtual uint32_t op_mask(){ return RGW_OP_TYPE_WRITE; }
 };
 
 #endif /* CEPH_RGW_OP_H */

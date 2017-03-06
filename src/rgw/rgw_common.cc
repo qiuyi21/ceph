@@ -886,6 +886,19 @@ bool verify_bucket_permission(struct req_state * const s,
                               RGWAccessControlPolicy * const bucket_acl,
                               const int perm)
 {
+  if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_WRITE)) {
+    switch (s->bucket_policy.verify_permission(s)) {
+    case RGW_POLICY_ALLOW:
+      return true;
+    case RGW_POLICY_DENY:
+      if (s->user->user_id.compare(s->bucket_owner.get_id()))
+        return false;
+      break;
+    default:
+      break;
+    }
+  }
+
   if (!bucket_acl)
     return false;
 
@@ -917,6 +930,23 @@ bool verify_object_permission(struct req_state * const s,
                               RGWAccessControlPolicy * const object_acl,
                               const int perm)
 {
+  if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_READ)) {
+    switch (s->bucket_policy.verify_permission(s)) {
+    case RGW_POLICY_ALLOW:
+      if (s->cct->_conf->rgw_bucket_owner_share_any_by_policy || !object_acl
+          || !bucket_acl->get_owner().get_id().compare(
+              object_acl->get_owner().get_id()))
+        return true;
+      break;
+    case RGW_POLICY_DENY:
+      if (s->user->user_id.compare(s->bucket_owner.get_id()))
+        return false;
+      break;
+    default:
+      break;
+    }
+  }
+
   if (!verify_requester_payer_permission(s))
     return false;
 

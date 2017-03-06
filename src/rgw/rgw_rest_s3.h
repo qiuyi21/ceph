@@ -257,6 +257,30 @@ public:
   int get_params();
 };
 
+class RGWGetBucketPolicy_ObjStore_S3: public RGWGetBucketPolicy_ObjStore {
+public:
+  RGWGetBucketPolicy_ObjStore_S3() {}
+  ~RGWGetBucketPolicy_ObjStore_S3() {}
+
+  void send_response();
+};
+
+class RGWPutBucketPolicy_ObjStore_S3: public RGWPutBucketPolicy_ObjStore {
+public:
+  RGWPutBucketPolicy_ObjStore_S3() {}
+  ~RGWPutBucketPolicy_ObjStore_S3() {}
+
+  void send_response();
+};
+
+class RGWDelBucketPolicy_ObjStore_S3: public RGWDelBucketPolicy_ObjStore {
+public:
+  RGWDelBucketPolicy_ObjStore_S3() {}
+  ~RGWDelBucketPolicy_ObjStore_S3() {}
+
+  void send_response();
+};
+
 class RGWGetCORS_ObjStore_S3 : public RGWGetCORS_ObjStore {
 public:
   RGWGetCORS_ObjStore_S3() {}

@@ -24,6 +24,7 @@ if WITH_RADOSGW
 librgw_la_SOURCES = \
 	rgw/rgw_acl.cc \
 	rgw/rgw_acl_s3.cc \
+	rgw/rgw_bucket_policy_s3.cc \
 	rgw/rgw_acl_swift.cc \
 	rgw/rgw_coroutine.cc \
 	rgw/rgw_cr_rados.cc \
@@ -179,6 +180,7 @@ bin_DEBUGPROGRAMS += ceph_rgw_jsonparser
 noinst_HEADERS += \
 	rgw/rgw_acl.h \
 	rgw/rgw_acl_s3.h \
+	rgw/rgw_bucket_policy_s3.h \
 	rgw/rgw_acl_swift.h \
 	rgw/rgw_b64.h \
 	rgw/rgw_client_io.h \
