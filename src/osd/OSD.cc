@@ -1422,11 +1422,14 @@ void OSDService::handle_misdirected_op(PG *pg, OpRequestRef op)
 
   dout(7) << *pg << " misdirected op in " << m->get_map_epoch() << dendl;
   clog->warn() << m->get_source_inst() << " misdirected " << m->get_reqid()
-	      << " pg " << m->get_pg()
-	      << " to osd." << whoami
-	      << " not " << pg->acting
-	      << " in e" << m->get_map_epoch() << "/" << osdmap->get_epoch() << "\n";
-  reply_op_error(op, -ENXIO);
+	       << " pg " << m->get_pg()
+	       << " to osd." << whoami
+	       << " not " << pg->acting
+	       << " in e" << m->get_map_epoch() << "/" << osdmap->get_epoch()
+	       << "\n";
+  if (g_conf->osd_enxio_on_misdirected_op) {
+    reply_op_error(op, -ENXIO);
+  }
 }
 
 
@@ -2939,7 +2942,6 @@ void OSD::add_newly_split_pg(PG *pg, PG::RecoveryCtx *rctx)
   pg->get_osdmap()->pg_to_up_acting_osds(pg->info.pgid.pgid, up, acting);
   int role = OSDMap::calc_pg_role(service.whoami, acting);
   pg->set_role(role);
-  pg->reg_next_scrub();
   pg->handle_loaded(rctx);
   pg->write_if_dirty(*(rctx->transaction));
   pg->queue_null(e, e);
@@ -6436,6 +6438,11 @@ void OSD::sched_scrub()
 	break;
       }
 
+      if (!cct->_conf->osd_scrub_during_recovery && is_recovery_active()) {
+        dout(10) << __func__ << "not scheduling scrub of " << scrub.pgid << " due to active recovery ops" << dendl;
+        break;
+      }
+
       PG *pg = _lookup_lock_pg(scrub.pgid);
       if (!pg)
 	continue;
@@ -8397,6 +8404,14 @@ void OSD::finish_recovery_op(PG *pg, const hobject_t& soid, bool dequeue)
   recovery_wq.unlock();
 }
 
+bool OSD::is_recovery_active()
+{
+  if (recovery_ops_active > 0)
+    return true;
+
+  return false;
+}
+
 // =========================================================
 // OPS
 
@@ -8539,14 +8554,16 @@ void OSD::handle_op(OpRequestRef& op, OSDMapRef& osdmap)
   if (!send_map->osd_is_valid_op_target(pgid.pgid, whoami)) {
     dout(7) << "we are invalid target" << dendl;
     clog->warn() << m->get_source_inst() << " misdirected " << m->get_reqid()
-		      << " pg " << m->get_pg()
-		      << " to osd." << whoami
-		      << " in e" << osdmap->get_epoch()
-		      << ", client e" << m->get_map_epoch()
-		      << " pg " << pgid
-		      << " features " << m->get_connection()->get_features()
-		      << "\n";
-    service.reply_op_error(op, -ENXIO);
+		 << " pg " << m->get_pg()
+		 << " to osd." << whoami
+		 << " in e" << osdmap->get_epoch()
+		 << ", client e" << m->get_map_epoch()
+		 << " pg " << pgid
+		 << " features " << m->get_connection()->get_features()
+		 << "\n";
+    if (g_conf->osd_enxio_on_misdirected_op) {
+      service.reply_op_error(op, -ENXIO);
+    }
     return;
   }
 
