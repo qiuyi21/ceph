@@ -48,6 +48,7 @@ librgw_la_SOURCES = \
 	rgw/rgw_metadata.cc \
 	rgw/rgw_multi.cc \
 	rgw/rgw_multi_del.cc \
+	rgw/rgw_mysql.cc \
 	rgw/rgw_auth_s3.cc \
 	rgw/rgw_period_history.cc \
 	rgw/rgw_period_puller.cc \
@@ -112,6 +113,8 @@ LIBRGW_DEPS += \
 	-lcurl \
 	-lexpat \
 	-lm \
+	-L/lib64/mysql \
+	-lmysqlclient \
 	-lfcgi \
 	-ldl
 
@@ -216,6 +219,7 @@ noinst_HEADERS += \
 	rgw/rgw_metadata.h \
 	rgw/rgw_meta_sync_status.h \
 	rgw/rgw_multi_del.h \
+	rgw/rgw_mysql.h \
 	rgw/rgw_object_expirer_core.h \
 	rgw/rgw_op.h \
 	rgw/rgw_os_lib.h \

@@ -30,6 +30,7 @@
 #include "rgw_rest_s3.h"
 #include "rgw_client_io.h"
 #include "rgw_bucket_policy_s3.h"
+#include "rgw_mysql.h"
 
 #include "include/assert.h"
 
@@ -2073,6 +2074,10 @@ void RGWCreateBucket::execute()
     s->bucket_info.swift_versioning = (! swift_ver_location->empty());
   }
 
+  RGWMysql mysql(s->cct);
+  op_ret = mysql.assign_bucket(s->bucket_name);
+  if (op_ret < 0) return;
+
   op_ret = store->create_bucket(*(s->user), s->bucket, zonegroup_id,
                                 placement_rule, s->bucket_info.swift_ver_location,
                                 attrs, info, pobjv, &ep_objv, creation_time,
@@ -2081,8 +2086,11 @@ void RGWCreateBucket::execute()
    * recover from a partial create by retrying it. */
   ldout(s->cct, 20) << "rgw_create_bucket returned ret=" << op_ret << " bucket=" << s->bucket << dendl;
 
-  if (op_ret && op_ret != -EEXIST)
+  if (op_ret && op_ret != -EEXIST) {
+    mysql.unassign_bucket(s->bucket_name);
     return;
+  }
+  mysql.disconnect();
 
   existed = (op_ret == -EEXIST);
 
@@ -2231,6 +2239,9 @@ void RGWDeleteBucket::execute()
     // lost a race, either with mdlog sync or another delete bucket operation.
     // in either case, we've already called rgw_unlink_bucket()
     op_ret = 0;
+    RGWMysql mysql(s->cct);
+    mysql.unassign_bucket(s->bucket_name);
+    mysql.disconnect();
     return;
   }
 
@@ -2247,7 +2258,9 @@ void RGWDeleteBucket::execute()
     return;
   }
 
-
+  RGWMysql mysql(s->cct);
+  mysql.unassign_bucket(s->bucket_name);
+  mysql.disconnect();
 }
 
 int RGWPutObj::verify_permission()

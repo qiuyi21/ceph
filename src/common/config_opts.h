@@ -1438,6 +1438,11 @@ OPTION(rgw_log_http_headers, OPT_STR, "" ) // list of HTTP headers to log when s
 OPTION(rgw_enable_bucket_policy, OPT_BOOL, true) // enable bucket policy feature
 OPTION(rgw_bucket_owner_share_any_by_policy, OPT_BOOL, false) // whether bucket owner can grant READ permission for any objects by bucket policy
 
+OPTION(rgw_bc_db_host, OPT_STR, "127.0.0.1")
+OPTION(rgw_bc_db_name, OPT_STR, "")
+OPTION(rgw_bc_db_user, OPT_STR, "root")
+OPTION(rgw_bc_db_pwd, OPT_STR, "")
+
 OPTION(rgw_num_async_rados_threads, OPT_INT, 32) // num of threads to use for async rados operations
 OPTION(rgw_md_notify_interval_msec, OPT_INT, 200) // metadata changes notification interval to followers
 OPTION(rgw_run_sync_thread, OPT_BOOL, true) // whether radosgw (not radosgw-admin) spawns the sync thread
