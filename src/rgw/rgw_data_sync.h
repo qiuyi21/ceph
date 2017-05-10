@@ -460,6 +460,7 @@ public:
                                                                                      num_shards(0) {}
   ~RGWBucketSyncStatusManager();
 
+  int set_src_bucket_info();
   int init();
 
   map<int, rgw_bucket_shard_sync_info>& get_sync_status() { return sync_status; }

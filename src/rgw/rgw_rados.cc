@@ -6782,13 +6782,15 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
       }
       conn = iter->second;
     }
-  } else {
+  } else if (!replica) {
     map<string, RGWRESTConn *>::iterator iter = zone_conn_map.find(source_zone);
     if (iter == zone_conn_map.end()) {
       ldout(cct, 0) << "could not find zone connection to zone: " << source_zone << dendl;
       return -ENOENT;
     }
     conn = iter->second;
+  } else {
+    conn = rest_master_conn;
   }
 
   string obj_name = dest_obj.bucket.name + "/" + dest_obj.get_object();

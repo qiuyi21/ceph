@@ -2689,9 +2689,48 @@ RGWCoroutine *RGWRemoteBucketLog::run_sync_cr()
   return new RGWRunBucketSyncCoroutine(&sync_env, bs);
 }
 
+struct bucket_info {
+  string name;
+  string id;
+
+  void decode_json(JSONObj *obj) {
+    JSONDecoder::decode_json("bucket", name, obj);
+    JSONDecoder::decode_json("id", id, obj);
+  }
+};
+
+int RGWBucketSyncStatusManager::set_src_bucket_info() {
+  map<string, string>::iterator iter = store->replica->conf.find("src_bucket");
+  if (iter == store->replica->conf.end()) {
+    ldout(store->ctx(), 0) << "ERROR: no replica src_bucket" << dendl;
+    return -EINVAL;
+  }
+
+  bucket.name = iter->second;
+  bucket.tenant = "";
+
+  rgw_http_param_pair pairs[] = { { "bucket", bucket.name.c_str() },
+                                  { NULL, NULL } };
+
+  string path = string("/") + store->ctx()->_conf->rgw_admin_entry + "/bucket";
+
+  bucket_info result;
+  int ret = cr_mgr.run(new RGWReadRESTResourceCR<bucket_info>(store->ctx(), conn, &http_manager, path, pairs, &result));
+  if (ret < 0) {
+    ldout(store->ctx(), 0) << "ERROR: failed to fetch bucket info from zone=" << source_zone << " path=" << path << " bucket=" << bucket.name << " ret=" << ret << dendl;
+    return ret;
+  }
+
+  ldout(store->ctx(), 15) << "replica src_bucket name=" << result.name << " id=" << result.id << dendl;
+
+  bucket.bucket_id = result.id;
+
+  return 0;
+}
+
 int RGWBucketSyncStatusManager::init()
 {
-  conn = store->get_zone_conn_by_id(source_zone);
+  conn = store->replica ? store->rest_master_conn : store->get_zone_conn_by_id(source_zone);
   if (!conn) {
     ldout(store->ctx(), 0) << "connection object to zone " << source_zone << " does not exist" << dendl;
     return -EINVAL;
@@ -2703,6 +2742,10 @@ int RGWBucketSyncStatusManager::init()
     return ret;
   }
 
+  if (store->replica) {
+    ret = set_src_bucket_info();
+    if (ret < 0) return ret;
+  }
 
   const string key = bucket.get_key();
 
@@ -2719,6 +2762,7 @@ int RGWBucketSyncStatusManager::init()
   }
 
   RGWBucketInfo& bi = result.data.get_bucket_info();
+  if (store->replica) bucket = bi.bucket;
   num_shards = bi.num_shards;
 
   error_logger = new RGWSyncErrorLogger(store, RGW_SYNC_ERROR_LOG_SHARD_PREFIX, ERROR_LOGGER_SHARDS);

@@ -487,6 +487,12 @@ int RGWAsyncFetchRemoteObj::_send_request()
   src_obj.set_instance(key.instance);
 
   rgw_obj dest_obj(src_obj);
+  RGWBucketInfo dest_bucket_info = bucket_info;
+  if (store->replica) {
+    dest_obj = rgw_obj(store->replica->bi.bucket, key.name);
+    dest_obj.set_instance(key.instance);
+    dest_bucket_info = store->replica->bi;
+  }
 
   int r = store->fetch_remote_obj(obj_ctx,
                        user_id,
@@ -497,7 +503,7 @@ int RGWAsyncFetchRemoteObj::_send_request()
                        source_zone,
                        dest_obj,
                        src_obj,
-                       bucket_info, /* dest */
+                       dest_bucket_info, /* dest */
                        bucket_info, /* source */
                        NULL, /* real_time* src_mtime, */
                        NULL, /* real_time* mtime, */

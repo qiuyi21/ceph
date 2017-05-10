@@ -13,7 +13,27 @@ RGWRESTConn::RGWRESTConn(CephContext *_cct, RGWRados *store,
     endpoints(remote_endpoints.begin(), remote_endpoints.end()),
     remote_id(_remote_id)
 {
-  key = store->get_zone_params().system_key;
+  if (store->replica) {
+    map<string, string>::iterator iter = store->replica->conf.find("src_access_key");
+    if (iter == store->replica->conf.end()) {
+      if (!remote_endpoints.empty()) {
+        ldout(_cct, 0) << "ERROR: no replica src_access_key" << dendl;
+      }
+    } else {
+      key.id = iter->second;
+    }
+    iter = store->replica->conf.find("src_secret_key");
+    if (iter == store->replica->conf.end()) {
+      if (!remote_endpoints.empty()) {
+        ldout(_cct, 0) << "ERROR: no replica src_secret_key" << dendl;
+      }
+    } else {
+      key.key = iter->second;
+    }
+    key.subuser = "";
+  } else {
+    key = store->get_zone_params().system_key;
+  }
   self_zone_group = store->get_zonegroup().get_id();
 }
 

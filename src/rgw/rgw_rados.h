@@ -1745,6 +1745,11 @@ struct bucket_info_entry {
   map<string, bufferlist> attrs;
 };
 
+struct replica_params {
+  RGWBucketInfo bi;
+  map<string, string> conf;
+};
+
 struct tombstone_entry {
   ceph::real_time mtime;
   uint32_t zone_short_id;
@@ -1911,6 +1916,7 @@ public:
                cr_registry(NULL),
                zone_short_id(0),
                rest_master_conn(NULL),
+               replica(NULL),
                meta_mgr(NULL), data_log(NULL) {}
 
   uint64_t get_new_req_id() {
@@ -1945,6 +1951,7 @@ public:
 
   map<string, string> zone_id_by_name;
   map<string, string> zone_name_by_id;
+  replica_params *replica;
 
   RGWRESTConn *get_zone_conn_by_id(const string& id) {
     auto citer = zone_conn_map.find(id);

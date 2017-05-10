@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <fstream>
 
 #include "auth/Crypto.h"
 
@@ -1585,9 +1586,31 @@ static int update_period(const string& realm_id, const string& realm_name,
   return 0;
 }
 
+static int init_bucket_for_sync2(const string& tenant) {
+  map<string, string>::iterator iter = store->replica->conf.find("dest_bucket");
+  if (iter == store->replica->conf.end()) {
+    cerr << "ERROR: no replica dest_bucket" << std::endl;
+    return EINVAL;
+  }
+
+  rgw_bucket bi;
+  int ret = init_bucket(tenant, iter->second, "", store->replica->bi, bi);
+  if (ret == -ENOENT) {
+    cerr << "ERROR: replica dest_bucket \"" << iter->second << "\" not found" << std::endl;
+    return EINVAL;
+  }
+  if (ret < 0) {
+    cerr << "ERROR: could not init replica dest_bucket \"" << iter->second << "\": " << cpp_strerror(-ret) << std::endl;
+    return -ret;
+  }
+
+  return 0;
+}
+
 static int init_bucket_for_sync(const string& tenant, const string& bucket_name,
                                 const string& bucket_id, rgw_bucket& bucket)
 {
+  if (store->replica) return init_bucket_for_sync2(tenant);
   RGWBucketInfo bucket_info;
 
   int ret = init_bucket(tenant, bucket_name, bucket_id, bucket_info, bucket);
@@ -2186,6 +2209,74 @@ public:
   }
 };
 
+static int init_replica(const string& confile, string& source_zone) {
+  ifstream is(confile);
+  if (is.fail()) {
+    cerr << "ERROR: could not read file \"" << confile << "\"" << std::endl;
+    return -EINVAL;
+  }
+
+  store->replica = new replica_params;
+
+  string line;
+  while (std::getline(is, line)) {
+    if (line.empty() || !line.compare(0, 1, "#")) continue;
+    size_t idx = line.find(':');
+    if (idx == string::npos) continue;
+    const string& k = line.substr(0, idx);
+    string val = line.substr(idx + 1);
+    const char *s = val.c_str();
+    idx = 0;
+    while (isspace(*s)) {
+      s++;
+      idx++;
+    }
+    if (idx) val.erase(0, idx);
+    if (!val.empty()) {
+      idx = val.length();
+      s = val.c_str() + idx - 1;
+      while (isspace(*s)) {
+        s--;
+        idx--;
+      }
+      if (idx != val.length()) val.erase(idx);
+    }
+    store->replica->conf.insert(pair<string, string>(k, val));
+  }
+
+  map<string, string>::iterator iter;
+  if (store->ctx()->_conf->subsys.should_gather(ceph_subsys_rgw, 15)) {
+    for (iter = store->replica->conf.begin(); iter != store->replica->conf.end(); ++iter)
+      cerr << iter->first << " => " << iter->second << std::endl;
+  }
+
+  if (source_zone.empty()) {
+    iter = store->replica->conf.find("source_zone");
+    if (iter == store->replica->conf.end()) {
+      cerr << "ERROR: no replica source_zone" << std::endl;
+      return -EINVAL;
+    } else if (!store->find_zone_id_by_name(iter->second, &source_zone)) {
+      cerr << "ERROR: cannot find replica source_zone id for name=" << iter->second << std::endl;
+      return -EINVAL;
+    }
+  }
+
+  iter = store->replica->conf.find("source");
+  if (iter == store->replica->conf.end()) {
+    cerr << "ERROR: no replica source" << std::endl;
+    return -EINVAL;
+  } else {
+    if (store->rest_master_conn)
+      delete store->rest_master_conn;
+
+    list<string> endpoints;
+    endpoints.push_back(iter->second);
+    store->rest_master_conn = new RGWRESTConn(store->ctx(), store, source_zone, endpoints);
+  }
+
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   vector<const char*> args;
@@ -2311,6 +2402,7 @@ int main(int argc, char **argv)
 
   string source_zone_name;
   string source_zone; /* zone id */
+  string replica_conf;
 
   boost::optional<string> index_pool;
   boost::optional<string> data_pool;
@@ -2592,6 +2684,8 @@ int main(int argc, char **argv)
       get_str_list(val, endpoints);
     } else if (ceph_argparse_witharg(args, i, &val, "--source-zone", (char*)NULL)) {
       source_zone_name = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--replica-conf", (char*)NULL)) {
+      replica_conf = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--index-pool", (char*)NULL)) {
       index_pool = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--data-pool", (char*)NULL)) {
@@ -2750,6 +2844,11 @@ int main(int argc, char **argv)
 
   rgw_user_init(store);
   rgw_bucket_init(store->meta_mgr);
+
+  if (!replica_conf.empty()) {
+    int ret = init_replica(replica_conf, source_zone);
+    if (ret < 0) return -ret;
+  }
 
   StoreDestructor store_destructor(store);
 
@@ -5812,7 +5911,7 @@ next:
       cerr << "ERROR: source zone not specified" << std::endl;
       return EINVAL;
     }
-    if (bucket_name.empty()) {
+    if (!store->replica && bucket_name.empty()) {
       cerr << "ERROR: bucket not specified" << std::endl;
       return EINVAL;
     }
@@ -5840,7 +5939,7 @@ next:
       cerr << "ERROR: source zone not specified" << std::endl;
       return EINVAL;
     }
-    if (bucket_name.empty()) {
+    if (!store->replica && bucket_name.empty()) {
       cerr << "ERROR: bucket not specified" << std::endl;
       return EINVAL;
     }
@@ -5873,7 +5972,7 @@ next:
       cerr << "ERROR: source zone not specified" << std::endl;
       return EINVAL;
     }
-    if (bucket_name.empty()) {
+    if (!store->replica && bucket_name.empty()) {
       cerr << "ERROR: bucket not specified" << std::endl;
       return EINVAL;
     }
