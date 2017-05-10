@@ -55,7 +55,7 @@ int PushAndRetryCR::operate()
           { "epoch", epoch.c_str() },
           { nullptr, nullptr }
         };
-        call(new PushCR(cct, conn, http, "/admin/realm/period",
+        call(new PushCR(cct, conn, http, string("/") + cct->_conf->rgw_admin_entry + "/realm/period",
                         params, period, nullptr));
       }
 

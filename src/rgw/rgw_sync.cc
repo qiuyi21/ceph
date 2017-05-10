@@ -233,7 +233,7 @@ int RGWRemoteMetaLog::read_log_info(rgw_mdlog_info *log_info)
   rgw_http_param_pair pairs[] = { { "type", "metadata" },
                                   { NULL, NULL } };
 
-  int ret = conn->get_json_resource("/admin/log", pairs, *log_info);
+  int ret = conn->get_json_resource(string("/") + store->ctx()->_conf->rgw_admin_entry + "/log", pairs, *log_info);
   if (ret < 0) {
     ldout(store->ctx(), 0) << "ERROR: failed to fetch mdlog info" << dendl;
     return ret;
@@ -473,7 +473,7 @@ public:
 					{ "info" , NULL },
 	                                { NULL, NULL } };
 
-        string p = "/admin/log/";
+        string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
 
         http_op = new RGWRESTReadResource(conn, p, pairs, NULL,
                                           env->http_manager);
@@ -538,7 +538,7 @@ public:
       { marker_key, marker.c_str() },
       { NULL, NULL } };
 
-    string p = "/admin/log/";
+    string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
 
     http_op = new RGWRESTReadResource(conn, p, pairs, NULL, sync_env->http_manager);
     http_op->set_user_info((void *)stack);
@@ -806,7 +806,7 @@ public:
                                                       mdlog_sync_full_sync_index_prefix));
       yield {
 	call(new RGWReadRESTResourceCR<list<string> >(cct, conn, sync_env->http_manager,
-				       "/admin/metadata", NULL, &sections));
+				       string("/") + cct->_conf->rgw_admin_entry + "/metadata", NULL, &sections));
       }
       if (get_ret_status() < 0) {
         ldout(cct, 0) << "ERROR: failed to fetch metadata sections" << dendl;
@@ -819,7 +819,7 @@ public:
       sections_iter = sections.begin();
       for (; sections_iter != sections.end(); ++sections_iter) {
         yield {
-	  string entrypoint = string("/admin/metadata/") + *sections_iter;
+	  string entrypoint = string("/") + cct->_conf->rgw_admin_entry + "/metadata/" + *sections_iter;
           /* FIXME: need a better scaling solution here, requires streaming output */
 	  call(new RGWReadRESTResourceCR<list<string> >(cct, conn, sync_env->http_manager,
 				       entrypoint, NULL, &result));
@@ -933,7 +933,7 @@ public:
         rgw_http_param_pair pairs[] = { { "key" , key.c_str()},
 	                                { NULL, NULL } };
 
-        string p = string("/admin/metadata/") + section + "/" + key;
+        string p = string("/") + cct->_conf->rgw_admin_entry + "/metadata/" + section + "/" + key;
 
         http_op = new RGWRESTReadResource(conn, p, pairs, NULL, sync_env->http_manager);
 
@@ -2118,7 +2118,7 @@ int RGWCloneMetaLogCoroutine::state_send_rest_request()
                                   { marker_key, marker.c_str() },
                                   { NULL, NULL } };
 
-  http_op = new RGWRESTReadResource(conn, "/admin/log", pairs, NULL, sync_env->http_manager);
+  http_op = new RGWRESTReadResource(conn, string("/") + cct->_conf->rgw_admin_entry + "/log", pairs, NULL, sync_env->http_manager);
 
   http_op->set_user_info((void *)stack);
 

@@ -1484,7 +1484,7 @@ static int commit_period(RGWRealm& realm, RGWPeriod& period,
   RGWEnv env;
   req_info info(g_ceph_context, &env);
   info.method = "POST";
-  info.request_uri = "/admin/realm/period";
+  info.request_uri = string("/") + g_ceph_context->_conf->rgw_admin_entry + "/realm/period";
 
   // json format into a bufferlist
   JSONFormatter jf(false);
@@ -1612,7 +1612,7 @@ static int do_period_pull(const string& remote, const string& url, const string&
   RGWEnv env;
   req_info info(g_ceph_context, &env);
   info.method = "GET";
-  info.request_uri = "/admin/realm/period";
+  info.request_uri = string("/") + g_ceph_context->_conf->rgw_admin_entry + "/realm/period";
 
   map<string, string> &params = info.args.get_params();
   if (!realm_id.empty())
@@ -3081,7 +3081,7 @@ int main(int argc, char **argv)
         RGWEnv env;
         req_info info(g_ceph_context, &env);
         info.method = "GET";
-        info.request_uri = "/admin/realm";
+        info.request_uri = string("/") + g_ceph_context->_conf->rgw_admin_entry + "/realm";
 
         map<string, string> &params = info.args.get_params();
         if (!realm_id.empty())
@@ -4272,7 +4272,7 @@ int main(int argc, char **argv)
       RGWEnv env;
       req_info info(g_ceph_context, &env);
       info.method = "POST";
-      info.request_uri = "/admin/realm/period";
+      info.request_uri = string("/") + g_ceph_context->_conf->rgw_admin_entry + "/realm/period";
 
       map<string, string> &params = info.args.get_params();
       if (!realm_id.empty())

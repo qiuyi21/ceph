@@ -177,7 +177,7 @@ public:
 					{ "info" , NULL },
 	                                { NULL, NULL } };
 
-        string p = "/admin/log/";
+        string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
 
         http_op = new RGWRESTReadResource(sync_env->conn, p, pairs, NULL, sync_env->http_manager);
 
@@ -257,7 +257,7 @@ public:
 	                                { "extra-info", "true" },
 	                                { NULL, NULL } };
 
-        string p = "/admin/log/";
+        string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
 
         http_op = new RGWRESTReadResource(sync_env->conn, p, pairs, NULL, sync_env->http_manager);
 
@@ -349,7 +349,7 @@ public:
       { marker_key, marker.c_str() },
       { NULL, NULL } };
 
-    string p = "/admin/log/";
+    string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
 
     http_op = new RGWRESTReadResource(conn, p, pairs, NULL, sync_env->http_manager);
     http_op->set_user_info((void *)stack);
@@ -514,7 +514,7 @@ int RGWRemoteDataLog::read_log_info(rgw_datalog_info *log_info)
   rgw_http_param_pair pairs[] = { { "type", "data" },
                                   { NULL, NULL } };
 
-  int ret = sync_env.conn->get_json_resource("/admin/log", pairs, *log_info);
+  int ret = sync_env.conn->get_json_resource(string("/") + store->ctx()->_conf->rgw_admin_entry + "/log", pairs, *log_info);
   if (ret < 0) {
     ldout(store->ctx(), 0) << "ERROR: failed to fetch datalog info" << dendl;
     return ret;
@@ -580,7 +580,7 @@ int RGWRemoteDataLog::get_shard_info(int shard_id)
                                   { NULL, NULL } };
 
   RGWDataChangesLogInfo info;
-  int ret = sync_env.conn->get_json_resource("/admin/log", pairs, info);
+  int ret = sync_env.conn->get_json_resource(string("/") + store->ctx()->_conf->rgw_admin_entry + "/log", pairs, info);
   if (ret < 0) {
     ldout(store->ctx(), 0) << "ERROR: failed to fetch datalog info" << dendl;
     return ret;
@@ -660,7 +660,7 @@ public:
                                                       store(sync_env->store), sync_status(_sync_status),
 						      req_ret(0), ret(0), entries_index(NULL), i(0), failed(false) {
     oid_prefix = datalog_sync_full_sync_index_prefix + "." + sync_env->source_zone; 
-    path = "/admin/metadata/bucket.instance";
+    path = string("/") + cct->_conf->rgw_admin_entry + "/metadata/bucket.instance";
     num_shards = sync_status->sync_info.num_shards;
   }
   ~RGWListBucketIndexesCR() {
@@ -673,7 +673,7 @@ public:
 						  store->get_zone_params().log_pool,
                                                   oid_prefix);
       yield {
-        string entrypoint = string("/admin/metadata/bucket.instance");
+        string entrypoint = string("/") + cct->_conf->rgw_admin_entry + "/metadata/bucket.instance";
         /* FIXME: need a better scaling solution here, requires streaming output */
         call(new RGWReadRESTResourceCR<list<string> >(store->ctx(), sync_env->conn, sync_env->http_manager,
                                                       entrypoint, NULL, &result));
@@ -1624,7 +1624,7 @@ public:
 					{ "info" , NULL },
 	                                { NULL, NULL } };
 
-        string p = "/admin/log/";
+        string p = string("/") + cct->_conf->rgw_admin_entry + "/log/";
         call(new RGWReadRESTResourceCR<bucket_index_marker_info>(sync_env->cct, sync_env->conn, sync_env->http_manager, p, pairs, info));
       }
       if (retcode < 0) {
@@ -1945,7 +1945,7 @@ public:
 					{ "type", "bucket-index" },
 	                                { NULL, NULL } };
 
-        call(new RGWReadRESTResourceCR<list<rgw_bi_log_entry> >(sync_env->cct, sync_env->conn, sync_env->http_manager, "/admin/log", pairs, result));
+        call(new RGWReadRESTResourceCR<list<rgw_bi_log_entry> >(sync_env->cct, sync_env->conn, sync_env->http_manager, string("/") + cct->_conf->rgw_admin_entry + "/log", pairs, result));
       }
       if (retcode < 0) {
         return set_cr_error(retcode);
@@ -2709,7 +2709,7 @@ int RGWBucketSyncStatusManager::init()
   rgw_http_param_pair pairs[] = { { "key", key.c_str() },
                                   { NULL, NULL } };
 
-  string path = string("/admin/metadata/bucket.instance");
+  string path = string("/") + store->ctx()->_conf->rgw_admin_entry + "/metadata/bucket.instance";
 
   bucket_instance_meta_info result;
   ret = cr_mgr.run(new RGWReadRESTResourceCR<bucket_instance_meta_info>(store->ctx(), conn, &http_manager, path, pairs, &result));

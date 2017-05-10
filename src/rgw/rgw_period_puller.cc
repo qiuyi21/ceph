@@ -21,7 +21,7 @@ int pull_period(RGWRESTConn* conn, const std::string& period_id,
   RGWEnv env;
   req_info info(conn->get_ctx(), &env);
   info.method = "GET";
-  info.request_uri = "/admin/realm/period";
+  info.request_uri = string("/") + conn->get_ctx()->_conf->rgw_admin_entry + "/realm/period";
 
   auto& params = info.args.get_params();
   params["realm_id"] = realm_id;
