@@ -1150,7 +1150,7 @@ int RGWPutBucketPolicy_ObjStore::get_params() {
   size_t cl = 0;
   if (s->length) {
     cl = atoll(s->length);
-    if (cl > 20480) {   // limited to 20KB
+    if (cl > s->cct->_conf->rgw_bucket_policy_max_length) {
       op_ret = -ERR_TOO_LARGE;
       return op_ret;
     }

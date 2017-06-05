@@ -1437,6 +1437,7 @@ OPTION(rgw_log_http_headers, OPT_STR, "" ) // list of HTTP headers to log when s
 
 OPTION(rgw_enable_bucket_policy, OPT_BOOL, true) // enable bucket policy feature
 OPTION(rgw_bucket_owner_share_any_by_policy, OPT_BOOL, false) // whether bucket owner can grant READ permission for any objects by bucket policy
+OPTION(rgw_bucket_policy_max_length, OPT_INT, 20 * 1024) // default 20KB
 
 OPTION(rgw_bc_db_host, OPT_STR, "127.0.0.1")
 OPTION(rgw_bc_db_name, OPT_STR, "")
