@@ -57,9 +57,9 @@ For example::
 To create a pool, execute:: 
 
 	ceph osd pool create {pool-name} {pg-num} [{pgp-num}] [replicated] \
-             [crush-ruleset-name] [expected-num-objects]
+             [crush-rule-name] [expected-num-objects]
 	ceph osd pool create {pool-name} {pg-num}  {pgp-num}   erasure \
-             [erasure-code-profile] [crush-ruleset-name] [expected_num_objects]
+             [erasure-code-profile] [crush-rule-name] [expected_num_objects]
 
 Where: 
 
@@ -104,10 +104,10 @@ Where:
 :Required: No. 
 :Default: replicated
 
-``[crush-ruleset-name]``
+``[crush-rule-name]``
 
-:Description: The name of a CRUSH ruleset to use for this pool.  The specified
-              ruleset must exist.
+:Description: The name of a CRUSH rule to use for this pool.  The specified
+              rule must exist.
 
 :Type: String
 :Required: No. 
@@ -301,6 +301,16 @@ You may set values for the following keys:
 :Description: The ruleset to use for mapping object placement in the cluster.
 :Type: Integer
 
+.. _allow_ec_overwrites:
+
+``allow_ec_overwrites``
+
+:Description: Whether writes to an erasure coded pool can update part
+              of an object, so cephfs and rbd can use it. See
+              `Erasure Coding with Overwrites`_ for more details.
+:Type: Boolean
+:Version: ``12.2.0`` and above
+
 .. _hashpspool:
 
 ``hashpspool``
@@ -466,7 +476,7 @@ You may set values for the following keys:
 :Default: ``20``
 
 
-``hit_set_grade_search_last_n``
+``hit_set_search_last_n``
 
 :Description: Count at most N appearance in hit_sets for temperature calculation
 :Type: Integer
@@ -731,3 +741,4 @@ a size of 3).
 .. _Pool, PG and CRUSH Config Reference: ../../configuration/pool-pg-config-ref
 .. _Bloom Filter: http://en.wikipedia.org/wiki/Bloom_filter
 .. _setting the number of placement groups: ../placement-groups#set-the-number-of-placement-groups
+.. _Erasure Coding with Overwrites: ../erasure-code#erasure-coding-with-overwrites

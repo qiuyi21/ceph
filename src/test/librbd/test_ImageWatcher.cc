@@ -12,12 +12,12 @@
 #include "common/RWLock.h"
 #include "cls/lock/cls_lock_client.h"
 #include "cls/lock/cls_lock_types.h"
-#include "librbd/AioCompletion.h"
-#include "librbd/AioImageRequestWQ.h"
 #include "librbd/internal.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageWatcher.h"
 #include "librbd/WatchNotifyTypes.h"
+#include "librbd/io/AioCompletion.h"
+#include "librbd/io/ImageRequestWQ.h"
 #include "test/librados/test.h"
 #include "gtest/gtest.h"
 #include <boost/assign/std/set.hpp>
@@ -58,10 +58,10 @@ public:
       return m_parent.m_ioctx.unwatch2(m_handle);
     }
 
-    virtual void handle_notify(uint64_t notify_id,
+    void handle_notify(uint64_t notify_id,
                                uint64_t cookie,
                                uint64_t notifier_id,
-                               bufferlist& bl) {
+                               bufferlist& bl) override {
       try {
 	int op;
 	bufferlist payload;
@@ -93,7 +93,7 @@ public:
       }
     }
 
-    virtual void handle_error(uint64_t cookie, int err) {
+    void handle_error(uint64_t cookie, int err) override {
       std::cerr << "ERROR: " << cookie << ", " << cpp_strerror(err)
 		<< std::endl; 
     }
@@ -108,7 +108,7 @@ public:
     uint64_t m_handle;
   };
 
-  virtual void TearDown() {
+  void TearDown() override {
     deregister_image_watch();
     TestFixture::TearDown();
   }
@@ -226,7 +226,7 @@ struct ProgressContext : public librbd::ProgressContext {
   ProgressContext() : mutex("ProgressContext::mutex"), received(false),
                       offset(0), total(0) {}
 
-  virtual int update_progress(uint64_t offset_, uint64_t total_) {
+  int update_progress(uint64_t offset_, uint64_t total_) override {
     Mutex::Locker l(mutex);
     offset = offset_;
     total = total_;
@@ -430,8 +430,8 @@ TEST_F(TestImageWatcher, NotifySnapCreate) {
 
   RWLock::RLocker l(ictx->owner_lock);
   C_SaferCond notify_ctx;
-  ictx->image_watcher->notify_snap_create("snap",
-	cls::rbd::UserSnapshotNamespace(), &notify_ctx);
+  ictx->image_watcher->notify_snap_create(cls::rbd::UserSnapshotNamespace(),
+	"snap", &notify_ctx);
   ASSERT_EQ(0, notify_ctx.wait());
 
   NotifyOps expected_notify_ops;
@@ -453,8 +453,8 @@ TEST_F(TestImageWatcher, NotifySnapCreateError) {
 
   RWLock::RLocker l(ictx->owner_lock);
   C_SaferCond notify_ctx;
-  ictx->image_watcher->notify_snap_create("snap",
-       cls::rbd::UserSnapshotNamespace(), &notify_ctx);
+  ictx->image_watcher->notify_snap_create(cls::rbd::UserSnapshotNamespace(),
+       "snap", &notify_ctx);
   ASSERT_EQ(-EEXIST, notify_ctx.wait());
 
   NotifyOps expected_notify_ops;
@@ -520,7 +520,9 @@ TEST_F(TestImageWatcher, NotifySnapRemove) {
 
   RWLock::RLocker l(ictx->owner_lock);
   C_SaferCond notify_ctx;
-  ictx->image_watcher->notify_snap_remove("snap", &notify_ctx);
+  ictx->image_watcher->notify_snap_remove(cls::rbd::UserSnapshotNamespace(),
+					  "snap",
+					  &notify_ctx);
   ASSERT_EQ(0, notify_ctx.wait());
 
   NotifyOps expected_notify_ops;
@@ -542,7 +544,9 @@ TEST_F(TestImageWatcher, NotifySnapProtect) {
 
   RWLock::RLocker l(ictx->owner_lock);
   C_SaferCond notify_ctx;
-  ictx->image_watcher->notify_snap_protect("snap", &notify_ctx);
+  ictx->image_watcher->notify_snap_protect(cls::rbd::UserSnapshotNamespace(),
+					   "snap",
+					   &notify_ctx);
   ASSERT_EQ(0, notify_ctx.wait());
 
   NotifyOps expected_notify_ops;
@@ -564,7 +568,9 @@ TEST_F(TestImageWatcher, NotifySnapUnprotect) {
 
   RWLock::RLocker l(ictx->owner_lock);
   C_SaferCond notify_ctx;
-  ictx->image_watcher->notify_snap_unprotect("snap", &notify_ctx);
+  ictx->image_watcher->notify_snap_unprotect(cls::rbd::UserSnapshotNamespace(),
+					     "snap",
+					     &notify_ctx);
   ASSERT_EQ(0, notify_ctx.wait());
 
   NotifyOps expected_notify_ops;

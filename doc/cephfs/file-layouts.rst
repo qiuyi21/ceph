@@ -34,6 +34,14 @@ stripe_count
 object_size
     Integer in bytes.  File data is chunked into RADOS objects of this size.
 
+.. tip::
+
+    RADOS enforces a configurable limit on object sizes: if you increase CephFS
+    object sizes beyond that limit then writes may not succeed.  The OSD
+    setting is ``rados_max_object_size``, which is 128MB by default.
+    Very large RADOS objects may prevent smooth operation of the cluster,
+    so increasing the object size limit past the default is not recommended.
+
 Reading layouts with ``getfattr``
 ---------------------------------
 
@@ -199,7 +207,7 @@ Before you can use a pool with CephFS you have to add it to the Metadata Servers
 
 .. code-block:: bash
 
-    $ ceph mds add_data_pool cephfs_data_ssd
+    $ ceph fs add_data_pool cephfs cephfs_data_ssd
     # Pool should now show up
     $ ceph fs ls
     .... data pools: [cephfs_data cephfs_data_ssd ]

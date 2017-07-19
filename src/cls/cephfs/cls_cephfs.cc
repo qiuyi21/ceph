@@ -15,7 +15,6 @@
 
 #include <string>
 #include <errno.h>
-#include <sstream>
 
 #include "objclass/objclass.h"
 
@@ -127,7 +126,7 @@ class PGLSCephFSFilter : public PGLSFilter {
 protected:
   std::string scrub_tag;
 public:
-  int init(bufferlist::iterator& params) {
+  int init(bufferlist::iterator& params) override {
     try {
       InodeTagFilterArgs args;
       args.decode(params);
@@ -145,10 +144,10 @@ public:
     return 0;
   }
 
-  virtual ~PGLSCephFSFilter() {}
-  virtual bool reject_empty_xattr() { return false; }
-  virtual bool filter(const hobject_t &obj, bufferlist& xattr_data,
-                      bufferlist& outdata);
+  ~PGLSCephFSFilter() override {}
+  bool reject_empty_xattr() override { return false; }
+  bool filter(const hobject_t &obj, bufferlist& xattr_data,
+                      bufferlist& outdata) override;
 };
 
 bool PGLSCephFSFilter::filter(const hobject_t &obj,

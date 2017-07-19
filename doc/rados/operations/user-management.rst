@@ -360,6 +360,8 @@ are often restricted to accessing a particular pool. ::
    pools in the cluster!
 
 
+.. _modify-user-capabilities:
+
 Modify User Capabilities
 ------------------------
 

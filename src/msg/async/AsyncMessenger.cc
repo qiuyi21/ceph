@@ -50,7 +50,7 @@ class Processor::C_processor_accept : public EventCallback {
 
  public:
   explicit C_processor_accept(Processor *p): pro(p) {}
-  void do_request(int id) {
+  void do_request(int id) override {
     pro->accept();
   }
 };
@@ -232,7 +232,7 @@ class C_handle_reap : public EventCallback {
 
   public:
   explicit C_handle_reap(AsyncMessenger *m): msgr(m) {}
-  void do_request(int id) {
+  void do_request(int id) override {
     // judge whether is a time event
     msgr->reap_dead();
   }
@@ -291,7 +291,15 @@ void AsyncMessenger::ready()
 {
   ldout(cct,10) << __func__ << " " << get_myaddr() << dendl;
 
-  stack->start();
+  stack->ready();
+  if (pending_bind) {
+    int err = bind(pending_bind_addr);
+    if (err) {
+      lderr(cct) << __func__ << " postponed bind failed" << dendl;
+      ceph_abort();
+    }
+  }
+
   Mutex::Locker l(lock);
   for (auto &&p : processors)
     p->start();
@@ -321,12 +329,23 @@ int AsyncMessenger::shutdown()
 int AsyncMessenger::bind(const entity_addr_t &bind_addr)
 {
   lock.Lock();
-  if (started) {
+
+  if (!pending_bind && started) {
     ldout(cct,10) << __func__ << " already started" << dendl;
     lock.Unlock();
     return -1;
   }
+
   ldout(cct,10) << __func__ << " bind " << bind_addr << dendl;
+
+  if (!stack->is_ready()) {
+    ldout(cct, 10) << __func__ << " Network Stack is not ready for bind yet - postponed" << dendl;
+    pending_bind_addr = bind_addr;
+    pending_bind = true;
+    lock.Unlock();
+    return 0;
+  }
+
   lock.Unlock();
 
   // bind to a socket
@@ -393,18 +412,18 @@ int AsyncMessenger::rebind(const set<int>& avoid_ports)
 
 int AsyncMessenger::client_bind(const entity_addr_t &bind_addr)
 {
-  lock.Lock();
+  if (!cct->_conf->ms_bind_before_connect)
+    return 0;
+  Mutex::Locker l(lock);
   if (did_bind) {
     assert(my_inst.addr == bind_addr);
     return 0;
   }
   if (started) {
     ldout(cct, 10) << __func__ << " already started" << dendl;
-    lock.Unlock();
     return -1;
   }
   ldout(cct, 10) << __func__ << " " << bind_addr << dendl;
-  lock.Unlock();
 
   set_myaddr(bind_addr);
   return 0;
@@ -535,9 +554,11 @@ ConnectionRef AsyncMessenger::get_loopback_connection()
 int AsyncMessenger::_send_message(Message *m, const entity_inst_t& dest)
 {
   FUNCTRACE();
-  if (m && m->get_type() == CEPH_MSG_OSD_OP)
+  assert(m);
+
+  if (m->get_type() == CEPH_MSG_OSD_OP)
     OID_EVENT_TRACE(((MOSDOp *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP");
-  else if (m && m->get_type() == CEPH_MSG_OSD_OPREPLY)
+  else if (m->get_type() == CEPH_MSG_OSD_OPREPLY)
     OID_EVENT_TRACE(((MOSDOpReply *)m)->get_oid().name.c_str(), "SEND_MSG_OSD_OP_REPLY");
 
   ldout(cct, 1) << __func__ << "--> " << dest.name << " "
@@ -613,10 +634,13 @@ void AsyncMessenger::set_addr_unknowns(const entity_addr_t &addr)
   }
 }
 
-int AsyncMessenger::send_keepalive(Connection *con)
+void AsyncMessenger::set_addr(const entity_addr_t &addr)
 {
-  con->send_keepalive();
-  return 0;
+  Mutex::Locker l(lock);
+  entity_addr_t t = addr;
+  t.set_nonce(nonce);
+  set_myaddr(t);
+  _init_local_connection();
 }
 
 void AsyncMessenger::shutdown_connections(bool queue_reset)

@@ -6,6 +6,8 @@
 #include "journal/Entry.h"
 #include "journal/Utils.h"
 
+#include <atomic>
+
 #define dout_subsys ceph_subsys_journaler
 #undef dout_prefix
 #define dout_prefix *_dout << "JournalRecorder: " << this << " "
@@ -19,7 +21,7 @@ namespace {
 struct C_Flush : public Context {
   JournalMetadataPtr journal_metadata;
   Context *on_finish;
-  atomic_t pending_flushes;
+  std::atomic<int64_t> pending_flushes = { 0 };
   int ret_val;
 
   C_Flush(JournalMetadataPtr _journal_metadata, Context *_on_finish,
@@ -28,17 +30,17 @@ struct C_Flush : public Context {
       pending_flushes(_pending_flushes), ret_val(0) {
   }
 
-  virtual void complete(int r) {
+  void complete(int r) override {
     if (r < 0 && ret_val == 0) {
       ret_val = r;
     }
-    if (pending_flushes.dec() == 0) {
+    if (--pending_flushes == 0) {
       // ensure all prior callback have been flushed as well
       journal_metadata->queue(on_finish, ret_val);
       delete this;
     }
   }
-  virtual void finish(int r) {
+  void finish(int r) override {
   }
 };
 

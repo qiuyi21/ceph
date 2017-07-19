@@ -20,7 +20,9 @@ class entity_name_t;
 namespace librbd {
 
 namespace watcher {
+namespace util {
 template <typename> struct HandlePayloadVisitor;
+}
 }
 
 class ImageCtx;
@@ -28,27 +30,34 @@ template <typename> class TaskFinisher;
 
 template <typename ImageCtxT = ImageCtx>
 class ImageWatcher : public Watcher {
-  friend struct watcher::HandlePayloadVisitor<ImageWatcher<ImageCtxT>>;
+  friend struct watcher::util::HandlePayloadVisitor<ImageWatcher<ImageCtxT>>;
 
 public:
   ImageWatcher(ImageCtxT& image_ctx);
-  virtual ~ImageWatcher();
+  ~ImageWatcher() override;
 
-  void unregister_watch(Context *on_finish);
+  void unregister_watch(Context *on_finish) override;
+  void block_notifies(Context *on_finish) override;
 
   void notify_flatten(uint64_t request_id, ProgressContext &prog_ctx,
                       Context *on_finish);
   void notify_resize(uint64_t request_id, uint64_t size, bool allow_shrink,
                      ProgressContext &prog_ctx, Context *on_finish);
-  void notify_snap_create(const std::string &snap_name,
-			  const cls::rbd::SnapshotNamespace &snap_namespace,
+  void notify_snap_create(const cls::rbd::SnapshotNamespace &snap_namespace,
+			  const std::string &snap_name,
 			  Context *on_finish);
   void notify_snap_rename(const snapid_t &src_snap_id,
                           const std::string &dst_snap_name,
                           Context *on_finish);
-  void notify_snap_remove(const std::string &snap_name, Context *on_finish);
-  void notify_snap_protect(const std::string &snap_name, Context *on_finish);
-  void notify_snap_unprotect(const std::string &snap_name, Context *on_finish);
+  void notify_snap_remove(const cls::rbd::SnapshotNamespace &snap_namespace,
+			  const std::string &snap_name,
+			  Context *on_finish);
+  void notify_snap_protect(const cls::rbd::SnapshotNamespace &snap_namespace,
+			   const std::string &snap_name,
+			   Context *on_finish);
+  void notify_snap_unprotect(const cls::rbd::SnapshotNamespace &snap_namespace,
+			     const std::string &snap_name,
+			     Context *on_finish);
   void notify_rebuild_object_map(uint64_t request_id,
                                  ProgressContext &prog_ctx, Context *on_finish);
   void notify_rename(const std::string &image_name, Context *on_finish);
@@ -104,7 +113,7 @@ private:
     {
     }
 
-    virtual int update_progress(uint64_t offset, uint64_t total) {
+    int update_progress(uint64_t offset, uint64_t total) override {
       m_image_watcher.schedule_async_progress(m_async_request_id, offset,
                                               total);
       return 0;
@@ -125,11 +134,11 @@ private:
     {
     }
 
-    virtual ~RemoteContext() {
+    ~RemoteContext() override {
       delete m_prog_ctx;
     }
 
-    virtual void finish(int r);
+    void finish(int r) override;
 
   private:
     ImageWatcher &m_image_watcher;
@@ -137,29 +146,13 @@ private:
     ProgressContext *m_prog_ctx;
   };
 
-  struct C_ProcessPayload : public Context {
-    ImageWatcher *image_watcher;
-    uint64_t notify_id;
-    uint64_t handle;
-    watch_notify::Payload payload;
-
-    C_ProcessPayload(ImageWatcher *image_watcher_, uint64_t notify_id_,
-                     uint64_t handle_, const watch_notify::Payload &payload)
-      : image_watcher(image_watcher_), notify_id(notify_id_), handle(handle_),
-        payload(payload) {
-    }
-
-    virtual void finish(int r) override {
-      image_watcher->process_payload(notify_id, handle, payload, r);
-    }
-  };
-
+  struct C_ProcessPayload;
   struct C_ResponseMessage : public Context {
-    watcher::C_NotifyAck *notify_ack;
+    C_NotifyAck *notify_ack;
 
-    C_ResponseMessage(watcher::C_NotifyAck *notify_ack) : notify_ack(notify_ack) {
+    C_ResponseMessage(C_NotifyAck *notify_ack) : notify_ack(notify_ack) {
     }
-    virtual void finish(int r);
+    void finish(int r) override;
   };
 
   ImageCtxT &m_image_ctx;
@@ -209,46 +202,46 @@ private:
                             ProgressContext** prog_ctx);
 
   bool handle_payload(const watch_notify::HeaderUpdatePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::AcquiredLockPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::ReleasedLockPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::RequestLockPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::AsyncProgressPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::AsyncCompletePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::FlattenPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::ResizePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::SnapCreatePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::SnapRenamePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::SnapRemovePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::SnapProtectPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::SnapUnprotectPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::RebuildObjectMapPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::RenamePayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::UpdateFeaturesPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   bool handle_payload(const watch_notify::UnknownPayload& payload,
-                      watcher::C_NotifyAck *ctx);
+                      C_NotifyAck *ctx);
   void process_payload(uint64_t notify_id, uint64_t handle,
-                             const watch_notify::Payload &payload, int r);
+                       const watch_notify::Payload &payload);
 
-  virtual void handle_notify(uint64_t notify_id, uint64_t handle,
-                             uint64_t notifier_id, bufferlist &bl);
-  virtual void handle_error(uint64_t cookie, int err);
-  virtual void handle_rewatch_complete(int r);
+  void handle_notify(uint64_t notify_id, uint64_t handle,
+                     uint64_t notifier_id, bufferlist &bl) override;
+  void handle_error(uint64_t cookie, int err) override;
+  void handle_rewatch_complete(int r) override;
 
   void send_notify(const watch_notify::Payload& payload,
                    Context *ctx = nullptr);

@@ -31,14 +31,16 @@ static ostream& _prefix(std::ostream *_dout, const PGLog *pglog)
 
 //////////////////// PGLog::IndexedLog ////////////////////
 
-PGLog::IndexedLog PGLog::IndexedLog::split_out_child(
+void PGLog::IndexedLog::split_out_child(
   pg_t child_pgid,
-  unsigned split_bits)
+  unsigned split_bits,
+  PGLog::IndexedLog *target)
 {
-  IndexedLog ret(pg_log_t::split_out_child(child_pgid, split_bits));
+  unindex();
+  *target = pg_log_t::split_out_child(child_pgid, split_bits);
   index();
+  target->index();
   reset_rollback_info_trimmed_to_riter();
-  return ret;
 }
 
 void PGLog::IndexedLog::trim(
@@ -128,8 +130,9 @@ void PGLog::trim(
 }
 
 void PGLog::proc_replica_log(
-  ObjectStore::Transaction& t,
-  pg_info_t &oinfo, const pg_log_t &olog, pg_missing_t& omissing,
+  pg_info_t &oinfo,
+  const pg_log_t &olog,
+  pg_missing_t& omissing,
   pg_shard_t from) const
 {
   dout(10) << "proc_replica_log for osd." << from << ": "
@@ -235,10 +238,9 @@ void PGLog::proc_replica_log(
  * This rewinds entries off the head of our log that are divergent.
  * This is used by replicas during activation.
  *
- * @param t transaction
  * @param newhead new head to rewind to
  */
-void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead,
+void PGLog::rewind_divergent_log(eversion_t newhead,
 				 pg_info_t &info, LogEntryHandler *rollbacker,
 				 bool &dirty_info, bool &dirty_big_info)
 {
@@ -270,8 +272,7 @@ void PGLog::rewind_divergent_log(ObjectStore::Transaction& t, eversion_t newhead
   dirty_big_info = true;
 }
 
-void PGLog::merge_log(ObjectStore::Transaction& t,
-                      pg_info_t &oinfo, pg_log_t &olog, pg_shard_t fromosd,
+void PGLog::merge_log(pg_info_t &oinfo, pg_log_t &olog, pg_shard_t fromosd,
                       pg_info_t &info, LogEntryHandler *rollbacker,
                       bool &dirty_info, bool &dirty_big_info)
 {
@@ -333,7 +334,7 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
 
   // do we have divergent entries to throw out?
   if (olog.head < log.head) {
-    rewind_divergent_log(t, olog.head, info, rollbacker, dirty_info, dirty_big_info);
+    rewind_divergent_log(olog.head, info, rollbacker, dirty_info, dirty_big_info);
     changed = true;
   }
 
@@ -367,7 +368,7 @@ void PGLog::merge_log(ObjectStore::Transaction& t,
     }
     log.roll_forward_to(log.head, rollbacker);
 
-    mempool::osd::list<pg_log_entry_t> new_entries;
+    mempool::osd_pglog::list<pg_log_entry_t> new_entries;
     new_entries.splice(new_entries.end(), olog.log, from, to);
     append_log_entries_update_missing(
       info.last_backfill,

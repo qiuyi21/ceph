@@ -7,7 +7,7 @@
 
 class CryptoEnvironment: public ::testing::Environment {
 public:
-  void SetUp() {
+  void SetUp() override {
     ceph::crypto::init(g_ceph_context);
   }
 };
@@ -110,12 +110,15 @@ TEST(HMACSHA1, Restart) {
 
 class ForkDeathTest : public ::testing::Test {
  protected:
-  virtual void SetUp() {
+  void SetUp() override {
     // shutdown NSS so it can be reinitialized after the fork
-    ceph::crypto::shutdown();
+    // some data structures used by NSPR are only initialized once, and they
+    // will be cleaned up with ceph::crypto::shutdown(false), so we need to
+    // keep them around after fork.
+    ceph::crypto::shutdown(true);
   }
 
-  virtual void TearDown() {
+  void TearDown() override {
     // undo the NSS shutdown we did in the parent process, after the
     // test is done
     ceph::crypto::init(g_ceph_context);

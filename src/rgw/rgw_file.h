@@ -24,9 +24,9 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/variant.hpp>
 #include <boost/utility/string_ref.hpp>
+#include <boost/optional.hpp>
 #include "xxhash.h"
 #include "include/buffer.h"
-#include "common/sstring.hh"
 #include "common/cohort_lru.h"
 #include "common/ceph_timer.h"
 #include "rgw_common.h"
@@ -34,6 +34,7 @@
 #include "rgw_lib.h"
 #include "rgw_ldap.h"
 #include "rgw_token.h"
+#include "rgw_compression.h"
 
 
 /* XXX
@@ -61,6 +62,20 @@ namespace rgw {
   class RGWFileHandle;
   class RGWWriteRequest;
 
+  static inline bool operator <(const struct timespec& lhs,
+				const struct timespec& rhs) {
+    if (lhs.tv_sec == rhs.tv_sec)
+      return lhs.tv_nsec < rhs.tv_nsec;
+    else
+      return lhs.tv_sec < rhs.tv_sec;
+  }
+
+  static inline bool operator ==(const struct timespec& lhs,
+				 const struct timespec& rhs) {
+    return ((lhs.tv_sec == rhs.tv_sec) &&
+	    (lhs.tv_nsec == rhs.tv_nsec));
+  }
+
   /*
    * XXX
    * The current 64-bit, non-cryptographic hash used here is intended
@@ -77,42 +92,50 @@ namespace rgw {
   struct fh_key
   {
     rgw_fh_hk fh_hk;
+    uint32_t version;
 
     static constexpr uint64_t seed = 8675309;
 
-    fh_key() {}
+    fh_key() : version(0) {}
 
     fh_key(const rgw_fh_hk& _hk)
-      : fh_hk(_hk) {
+      : fh_hk(_hk), version(0) {
       // nothing
     }
 
-    fh_key(const uint64_t bk, const uint64_t ok) {
+    fh_key(const uint64_t bk, const uint64_t ok)
+      : version(0) {
       fh_hk.bucket = bk;
       fh_hk.object = ok;
     }
 
-    fh_key(const uint64_t bk, const char *_o) {
+    fh_key(const uint64_t bk, const char *_o)
+      : version(0) {
       fh_hk.bucket = bk;
       fh_hk.object = XXH64(_o, ::strlen(_o), seed);
     }
     
-    fh_key(const std::string& _b, const std::string& _o) {
+    fh_key(const std::string& _b, const std::string& _o)
+      : version(0) {
       fh_hk.bucket = XXH64(_b.c_str(), _o.length(), seed);
       fh_hk.object = XXH64(_o.c_str(), _o.length(), seed);
     }
 
     void encode(buffer::list& bl) const {
-      ENCODE_START(1, 1, bl);
+      ENCODE_START(2, 1, bl);
       ::encode(fh_hk.bucket, bl);
       ::encode(fh_hk.object, bl);
+      ::encode((uint32_t)2, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(bufferlist::iterator& bl) {
-      DECODE_START(1, bl);
+      DECODE_START(2, bl);
       ::decode(fh_hk.bucket, bl);
       ::decode(fh_hk.object, bl);
+      if (struct_v >= 2) {
+	::decode(version, bl);
+      }
       DECODE_FINISH(bl);
     }
   }; /* fh_key */
@@ -164,11 +187,12 @@ namespace rgw {
     using lock_guard = std::lock_guard<std::mutex>;
     using unique_lock = std::unique_lock<std::mutex>;
 
-    /* median file name length (HPC) has been found to be 16,
-     * w/90% of file names <= 31 (Yifan Wang, CMU) */
-    using dirent_string = basic_sstring<char, uint16_t, 32>;
-
-    using marker_cache_t = flat_map<uint64_t, dirent_string>;
+    /* TODO: keeping just the last marker is sufficient for
+     * nfs-ganesha 2.4.5; in the near future, nfs-ganesha will
+     * be able to hint the name of the next dirent required,
+     * from which we can directly synthesize a RADOS marker.
+     * using marker_cache_t = flat_map<uint64_t, rgw_obj_key>;
+     */
 
     struct State {
       uint64_t dev;
@@ -193,16 +217,15 @@ namespace rgw {
     struct directory {
 
       static constexpr uint32_t FLAG_NONE =     0x0000;
-      static constexpr uint32_t FLAG_CACHED =   0x0001;
-      static constexpr uint32_t FLAG_OVERFLOW = 0x0002;
 
       uint32_t flags;
-      marker_cache_t marker_cache;
+      rgw_obj_key last_marker;
+      struct timespec last_readdir;
 
-      directory() : flags(FLAG_NONE) {}
-
-      void clear_state();
+      directory() : flags(FLAG_NONE), last_readdir{0,0} {}
     };
+
+    void clear_state();
 
     boost::variant<file, directory> variant_type;
 
@@ -268,7 +291,7 @@ namespace rgw {
 	variant_type = directory();
 	flags |= FLAG_BUCKET;
       } else {
-	bucket = (parent->flags & FLAG_BUCKET) ? parent
+	bucket = parent->is_bucket() ? parent
 	  : parent->bucket;
 	if (flags & FLAG_DIRECTORY) {
 	  fh.fh_type = RGW_FS_TYPE_DIRECTORY;
@@ -326,6 +349,7 @@ namespace rgw {
     uint32_t get_owner_uid() const { return state.owner_uid; }
     uint32_t get_owner_gid() const { return state.owner_gid; }
 
+    struct timespec get_ctime() const { return state.ctime; }
     struct timespec get_mtime() const { return state.mtime; }
 
     void create_stat(struct stat* st, uint32_t mask) {
@@ -346,6 +370,13 @@ namespace rgw {
 	break;
 	}
       }
+
+      if (mask & RGW_SETATTR_ATIME)
+	state.atime = st->st_atim;
+      if (mask & RGW_SETATTR_MTIME)
+	state.mtime = st->st_mtim;
+      if (mask & RGW_SETATTR_CTIME)
+	state.ctime = st->st_ctim;
     }
 
     int stat(struct stat* st) {
@@ -371,7 +402,7 @@ namespace rgw {
 
       switch (fh.fh_type) {
       case RGW_FS_TYPE_DIRECTORY:
-	st->st_nlink = 3;
+	st->st_nlink = state.nlink;
 	break;
       case RGW_FS_TYPE_FILE:
 	st->st_nlink = 1;
@@ -388,18 +419,18 @@ namespace rgw {
     const std::string& bucket_name() const {
       if (is_root())
 	return root_name;
-      if (flags & FLAG_BUCKET)
+      if (is_bucket())
 	return name;
       return bucket->object_name();
     }
 
     const std::string& object_name() const { return name; }
 
-    std::string full_object_name(bool omit_bucket = false) {
+    std::string full_object_name(bool omit_bucket = false) const {
       std::string path;
       std::vector<const std::string*> segments;
       int reserve = 0;
-      RGWFileHandle* tfh = this;
+      const RGWFileHandle* tfh = this;
       while (tfh && !tfh->is_root() && !(tfh->is_bucket() && omit_bucket)) {
 	segments.push_back(&tfh->object_name());
 	reserve += (1 + tfh->object_name().length());
@@ -420,20 +451,23 @@ namespace rgw {
       return path;
     }
 
-    inline std::string relative_object_name() {
+    inline std::string relative_object_name() const {
       return full_object_name(true /* omit_bucket */);
     }
 
-    inline std::string format_child_name(const std::string& cbasename) {
+    inline std::string format_child_name(const std::string& cbasename,
+                                         bool is_dir) const {
       std::string child_name{relative_object_name()};
       if ((child_name.size() > 0) &&
 	  (child_name.back() != '/'))
 	child_name += "/";
       child_name += cbasename;
+      if (is_dir)
+	child_name += "/";
       return child_name;
     }
 
-    inline std::string make_key_name(const char *name) {
+    inline std::string make_key_name(const char *name) const {
       std::string key_name{full_object_name()};
       if (key_name.length() > 0)
 	key_name += "/";
@@ -441,7 +475,7 @@ namespace rgw {
       return key_name;
     }
 
-    fh_key make_fhk(const std::string& name) {
+    fh_key make_fhk(const std::string& name) const {
       if (depth <= 1)
 	return fh_key(fhk.fh_hk.object, name.c_str());
       else {
@@ -450,29 +484,27 @@ namespace rgw {
       }
     }
 
-    void add_marker(uint64_t off, const boost::string_ref& marker,
+    void add_marker(uint64_t off, const rgw_obj_key& marker,
 		    uint8_t obj_type) {
       using std::get;
       directory* d = get<directory>(&variant_type);
       if (d) {
 	unique_lock guard(mtx);
-	// XXXX check for failure (dup key)
-	d->marker_cache.insert(
-	  marker_cache_t::value_type(off, marker.data()));
+	d->last_marker = marker;
       }
     }
 
-    std::string find_marker(uint64_t off) { // XXX copy
+    const rgw_obj_key* find_marker(uint64_t off) const {
       using std::get;
-      directory* d = get<directory>(&variant_type);
-      if (d) {
-	const auto& iter = d->marker_cache.find(off);
-	if (iter != d->marker_cache.end())
-	  return iter->second;
+      if (off > 0) {
+	const directory* d = get<directory>(&variant_type);
+	if (d ) {
+	  return &d->last_marker;
+	}
       }
-      return "";
+      return nullptr;
     }
-    
+
     bool is_open() const { return flags & FLAG_OPEN; }
     bool is_root() const { return flags & FLAG_ROOT; }
     bool is_bucket() const { return flags & FLAG_BUCKET; }
@@ -482,17 +514,18 @@ namespace rgw {
     bool creating() const { return flags & FLAG_CREATING; }
     bool deleted() const { return flags & FLAG_DELETED; }
     bool stateless_open() const { return flags & FLAG_STATELESS_OPEN; }
+    bool has_children() const;
 
-    uint32_t open(uint32_t gsh_flags) {
+    int open(uint32_t gsh_flags) {
       lock_guard guard(mtx);
-      if (! (flags & FLAG_OPEN)) {
+      if (! is_open()) {
 	if (gsh_flags & RGW_OPEN_FLAG_V3) {
 	  flags |= FLAG_STATELESS_OPEN;
 	}
 	flags |= FLAG_OPEN;
 	return 0;
       }
-      return EPERM;
+      return -EPERM;
     }
 
     int readdir(rgw_readdir_cb rcb, void *cb_arg, uint64_t *offset, bool *eof,
@@ -520,6 +553,10 @@ namespace rgw {
     void clear_creating() {
       lock_guard guard(mtx);
       flags &= ~FLAG_CREATING;
+    }
+
+    void inc_nlink(const uint64_t n) {
+      state.nlink += n;
     }
 
     void set_nlink(const uint64_t n) {
@@ -585,12 +622,12 @@ namespace rgw {
     void encode_attrs(ceph::buffer::list& ux_key1,
 		      ceph::buffer::list& ux_attrs1);
 
-    void decode_attrs(const ceph::buffer::list* ux_key1,
+    bool decode_attrs(const ceph::buffer::list* ux_key1,
 		      const ceph::buffer::list* ux_attrs1);
 
     void invalidate();
 
-    virtual bool reclaim();
+    bool reclaim() override;
 
     typedef cohort::lru::LRU<std::mutex> FhLRU;
 
@@ -640,7 +677,7 @@ namespace rgw {
     typedef cohort::lru::TreeX<RGWFileHandle, FhTree, FhLT, FhEQ, fh_key,
 			       std::mutex> FHCache;
 
-    virtual ~RGWFileHandle();
+    ~RGWFileHandle() override;
 
     friend std::ostream& operator<<(std::ostream &os,
 				    RGWFileHandle const &rgw_fh);
@@ -662,14 +699,14 @@ namespace rgw {
 	: fs(fs), fs_inst(fs_inst), parent(parent), fhk(fhk), name(name),
 	  flags(flags) {}
 
-      void recycle (cohort::lru::Object* o) {
+      void recycle (cohort::lru::Object* o) override {
 	/* re-use an existing object */
 	o->~Object(); // call lru::Object virtual dtor
 	// placement new!
 	new (o) RGWFileHandle(fs, fs_inst, parent, fhk, name, flags);
       }
 
-      cohort::lru::Object* alloc() {
+      cohort::lru::Object* alloc() override {
 	return new RGWFileHandle(fs, fs_inst, parent, fhk, name, flags);
       }
     }; /* Factory */
@@ -682,13 +719,29 @@ namespace rgw {
     return static_cast<RGWFileHandle*>(fh->fh_private);
   }
 
+  static inline enum rgw_fh_type fh_type_of(uint32_t flags) {
+    enum rgw_fh_type fh_type;
+    switch(flags & RGW_LOOKUP_TYPE_FLAGS)
+    {
+    case RGW_LOOKUP_FLAG_DIR:
+      fh_type = RGW_FS_TYPE_DIRECTORY;
+      break;
+    case RGW_LOOKUP_FLAG_FILE:
+      fh_type = RGW_FS_TYPE_FILE;
+      break;
+    default:
+      fh_type = RGW_FS_TYPE_NIL;
+    };
+    return fh_type;
+  }
+
   typedef std::tuple<RGWFileHandle*, uint32_t> LookupFHResult;
   typedef std::tuple<RGWFileHandle*, int> MkObjResult;
 
   class RGWLibFS
   {
     CephContext* cct;
-    struct rgw_fs fs;
+    struct rgw_fs fs{};
     RGWFileHandle root_fh;
     rgw_fh_callback_t invalidate_cb;
     void *invalidate_arg;
@@ -704,7 +757,8 @@ namespace rgw {
     RGWUserInfo user;
     RGWAccessKey key; // XXXX acc_key
 
-    static atomic<uint32_t> fs_inst;
+    static std::atomic<uint32_t> fs_inst_counter;
+
     static uint32_t write_completion_interval_s;
     std::string fsid;
 
@@ -736,7 +790,7 @@ namespace rgw {
       }
 
       void operator()() {
-	rgw_fh.write_finish();
+	rgw_fh.close(); /* will finish in-progress write */
 	rgw_fh.get_fs()->unref(&rgw_fh);
       }
     };
@@ -755,6 +809,10 @@ namespace rgw {
       }
     } state;
 
+    uint32_t new_inst() {
+      return ++fs_inst_counter;
+    }
+
     friend class RGWFileHandle;
     friend class RGWLibProcess;
 
@@ -763,9 +821,16 @@ namespace rgw {
     static constexpr uint32_t FLAG_NONE =      0x0000;
     static constexpr uint32_t FLAG_CLOSED =    0x0001;
 
+    struct BucketStats {
+      size_t size;
+      size_t size_rounded;
+      real_time creation_time;
+      uint64_t num_entries;
+    };
+
     RGWLibFS(CephContext* _cct, const char *_uid, const char *_user_id,
 	    const char* _key)
-      : cct(_cct), root_fh(this, get_inst()), invalidate_cb(nullptr),
+      : cct(_cct), root_fh(this, new_inst()), invalidate_cb(nullptr),
 	invalidate_arg(nullptr), shutdown(false), refcnt(1),
 	fh_cache(cct->_conf->rgw_nfs_fhcache_partitions,
 		 cct->_conf->rgw_nfs_fhcache_size),
@@ -773,12 +838,9 @@ namespace rgw {
 	       cct->_conf->rgw_nfs_lru_lane_hiwat),
 	uid(_uid), key(_user_id, _key) {
 
-      /* fixup fs_inst */
-      root_fh.state.dev = ++fs_inst;
-
       /* no bucket may be named rgw_fs_inst-(.*) */
       fsid = RGWFileHandle::root_name + "rgw_fs_inst-" +
-	std::to_string(fs_inst);
+	std::to_string(get_inst());
 
       root_fh.init_rootfs(fsid /* bucket */, RGWFileHandle::root_name);
 
@@ -871,6 +933,7 @@ namespace rgw {
       LookupFHResult fhr { nullptr, uint32_t(RGWFileHandle::FLAG_NONE) };
 
       RGWFileHandle::FHCache::Latch lat;
+      bool fh_locked = flags & RGWFileHandle::FLAG_LOCKED;
 
     retry:
       RGWFileHandle* fh =
@@ -879,11 +942,13 @@ namespace rgw {
 			    RGWFileHandle::FHCache::FLAG_LOCK);
       /* LATCHED */
       if (fh) {
-	fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
+	if (likely(! fh_locked))
+	    fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
 	/* need initial ref from LRU (fast path) */
 	if (! fh_lru.ref(fh, cohort::lru::FLAG_INITIAL)) {
 	  lat.lock->unlock();
-	  fh->mtx.unlock();
+	  if (likely(! fh_locked))
+	    fh->mtx.unlock();
 	  goto retry; /* !LATCHED */
 	}
 	/* LATCHED, LOCKED */
@@ -915,6 +980,7 @@ namespace rgw {
 	return fhr;
 
       RGWFileHandle::FHCache::Latch lat;
+      bool fh_locked = flags & RGWFileHandle::FLAG_LOCKED;
 
       std::string obj_name{name};
       std::string key_name{parent->make_key_name(name)};
@@ -925,7 +991,7 @@ namespace rgw {
 	<< " (" << obj_name << ")"
 	<< dendl;
 
-      fh_key fhk = parent->make_fhk(key_name);
+      fh_key fhk = parent->make_fhk(obj_name);
 
     retry:
       RGWFileHandle* fh =
@@ -934,23 +1000,27 @@ namespace rgw {
 			    RGWFileHandle::FHCache::FLAG_LOCK);
       /* LATCHED */
       if (fh) {
-	fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
+	if (likely(! fh_locked))
+	  fh->mtx.lock(); // XXX !RAII because may-return-LOCKED
 	if (fh->flags & RGWFileHandle::FLAG_DELETED) {
 	  /* for now, delay briefly and retry */
 	  lat.lock->unlock();
-	  fh->mtx.unlock();
+	  if (likely(! fh_locked))
+	    fh->mtx.unlock();
 	  std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	  goto retry; /* !LATCHED */
 	}
 	/* need initial ref from LRU (fast path) */
 	if (! fh_lru.ref(fh, cohort::lru::FLAG_INITIAL)) {
 	  lat.lock->unlock();
-	  fh->mtx.unlock();
+	  if (likely(! fh_locked))
+	    fh->mtx.unlock();
 	  goto retry; /* !LATCHED */
 	}
 	/* LATCHED, LOCKED */
 	if (! (flags & RGWFileHandle::FLAG_LOCK))
-	  fh->mtx.unlock(); /* ! LOCKED */
+	  if (likely(! fh_locked))
+	    fh->mtx.unlock(); /* ! LOCKED */
       } else {
 	/* make or re-use handle */
 	RGWFileHandle::Factory prototype(this, get_inst(), parent, fhk,
@@ -1005,11 +1075,16 @@ namespace rgw {
     int setattr(RGWFileHandle* rgw_fh, struct stat* st, uint32_t mask,
 		uint32_t flags);
 
-    LookupFHResult stat_bucket(RGWFileHandle* parent,
-			       const char *path, uint32_t flags);
+    void update_fhk(RGWFileHandle *rgw_fh);
+
+
+    LookupFHResult stat_bucket(RGWFileHandle* parent, const char *path,
+			       RGWLibFS::BucketStats& bs,
+			       uint32_t flags);
 
     LookupFHResult stat_leaf(RGWFileHandle* parent, const char *path,
-			     uint32_t flags);
+			     enum rgw_fh_type type = RGW_FS_TYPE_NIL,
+			     uint32_t flags = RGWFileHandle::FLAG_NONE);
 
     int read(RGWFileHandle* rgw_fh, uint64_t offset, size_t length,
 	     size_t* bytes_read, void* buffer, uint32_t flags);
@@ -1021,8 +1096,6 @@ namespace rgw {
 		      uint32_t mask, uint32_t flags);
 
     MkObjResult mkdir(RGWFileHandle* parent, const char *name, struct stat *st,
-		      uint32_t mask, uint32_t flags);
-    MkObjResult mkdir2(RGWFileHandle* parent, const char *name, struct stat *st,
 		      uint32_t mask, uint32_t flags);
 
     int unlink(RGWFileHandle* rgw_fh, const char *name,
@@ -1073,7 +1146,6 @@ namespace rgw {
       if (! fh) {
 	if (unlikely(fh_hk == root_fh.fh.fh_hk)) {
 	  fh = &root_fh;
-	  ref(fh);
 	}
       }
 
@@ -1086,7 +1158,7 @@ namespace rgw {
 
     struct rgw_fs* get_fs() { return &fs; }
 
-    uint32_t get_inst() { return fs_inst; }
+    uint32_t get_inst() { return root_fh.state.dev; }
 
     RGWUserInfo* get_user() { return &user; }
 
@@ -1117,26 +1189,23 @@ public:
   void* cb_arg;
   rgw_readdir_cb rcb;
   size_t ix;
+  uint32_t d_count;
 
   RGWListBucketsRequest(CephContext* _cct, RGWUserInfo *_user,
 			RGWFileHandle* _rgw_fh, rgw_readdir_cb _rcb,
 			void* _cb_arg, uint64_t* _offset)
     : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), offset(_offset),
-      cb_arg(_cb_arg), rcb(_rcb), ix(0) {
-    const std::string& sm = rgw_fh->find_marker(*offset);
-    if (sm.size() > 0) {
-      RGWListBuckets::marker =
-	rgw_fh->relative_object_name();
-      if (marker.back() != '/')
-	marker += "/";
-      marker += sm;
+      cb_arg(_cb_arg), rcb(_rcb), ix(0), d_count(0) {
+    const auto& mk = rgw_fh->find_marker(*offset);
+    if (mk) {
+      marker = mk->name;
     }
     op = this;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return false; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1147,7 +1216,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
     struct req_state* s = get_state();
     s->info.method = "GET";
     s->op = OP_GET;
@@ -1165,39 +1234,47 @@ public:
     return 0;
   }
 
-  int get_params() {
+  int get_params() override {
     limit = -1; /* no limit */
     return 0;
   }
 
-  virtual void send_response_begin(bool has_buckets) {
+  void send_response_begin(bool has_buckets) override {
     sent_data = true;
   }
 
-  virtual void send_response_data(RGWUserBuckets& buckets) {
+  void send_response_data(RGWUserBuckets& buckets) override {
     if (!sent_data)
       return;
     map<string, RGWBucketEnt>& m = buckets.get_buckets();
     for (const auto& iter : m) {
       boost::string_ref marker{iter.first};
       const RGWBucketEnt& ent = iter.second;
-      /* call me maybe */
-      this->operator()(ent.bucket.name, marker);
+      if (! this->operator()(ent.bucket.name, marker)) {
+	/* caller cannot accept more */
+	lsubdout(cct, rgw, 5) << "ListBuckets rcb failed"
+			      << " dirent=" << ent.bucket.name
+			      << " call count=" << ix
+			      << dendl;
+	return;
+      }
       ++ix;
     }
   } /* send_response_data */
 
-  virtual void send_response_end() {
+  void send_response_end() override {
     // do nothing
   }
 
-  int operator()(const boost::string_ref& name, const boost::string_ref& marker) {
+  int operator()(const boost::string_ref& name,
+		 const boost::string_ref& marker) {
     uint64_t off = XXH64(name.data(), name.length(), fh_key::seed);
     *offset = off;
     /* update traversal cache */
-    rgw_fh->add_marker(off, marker, RGW_FS_TYPE_DIRECTORY);
-    rcb(name.data(), cb_arg, off);
-    return 0;
+    rgw_fh->add_marker(off, rgw_obj_key{marker.data(), ""},
+		       RGW_FS_TYPE_DIRECTORY);
+    ++d_count;
+    return rcb(name.data(), cb_arg, off, RGW_LOOKUP_FLAG_DIR);
   }
 
   bool eof() {
@@ -1213,8 +1290,8 @@ public:
   read directory content (bucket objects)
 */
 
-  class RGWReaddirRequest : public RGWLibRequest,
-			    public RGWListBucket /* RGWOp */
+class RGWReaddirRequest : public RGWLibRequest,
+			  public RGWListBucket /* RGWOp */
 {
 public:
   RGWFileHandle* rgw_fh;
@@ -1222,26 +1299,24 @@ public:
   void* cb_arg;
   rgw_readdir_cb rcb;
   size_t ix;
+  uint32_t d_count;
 
   RGWReaddirRequest(CephContext* _cct, RGWUserInfo *_user,
 		    RGWFileHandle* _rgw_fh, rgw_readdir_cb _rcb,
 		    void* _cb_arg, uint64_t* _offset)
     : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), offset(_offset),
-      cb_arg(_cb_arg), rcb(_rcb), ix(0) {
-    const std::string& sm{rgw_fh->find_marker(*offset)};
-    if (sm.size() > 0) {
-      RGWListBucket::marker = {rgw_fh->relative_object_name(), ""};
-      if (marker.name.back() != '/')
-	marker.name += "/";
-      marker.name += sm;
+      cb_arg(_cb_arg), rcb(_rcb), ix(0), d_count(0) {
+    const auto& mk = rgw_fh->find_marker(*offset);
+    if (mk) {
+      marker = *mk;
     }
     default_max = 1000; // XXX was being omitted
     op = this;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1252,7 +1327,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
     struct req_state* s = get_state();
     s->info.method = "GET";
     s->op = OP_GET;
@@ -1276,7 +1351,7 @@ public:
     return 0;
   }
 
-  int operator()(const boost::string_ref name, const boost::string_ref marker,
+  int operator()(const boost::string_ref name, const rgw_obj_key& marker,
 		uint8_t type) {
 
     assert(name.length() > 0); // XXX
@@ -1286,16 +1361,19 @@ public:
     *offset = off;
     /* update traversal cache */
     rgw_fh->add_marker(off, marker, type);
-    rcb(name.data(), cb_arg, off); // XXX has to be legit C-style string
-    return 0;
+    ++d_count;
+    return rcb(name.data(), cb_arg, off,
+	       (type == RGW_FS_TYPE_DIRECTORY) ?
+	       RGW_LOOKUP_FLAG_DIR :
+	       RGW_LOOKUP_FLAG_FILE);
   }
 
-  virtual int get_params() {
+  int get_params() override {
     max = default_max;
     return 0;
   }
 
-  virtual void send_response() {
+  void send_response() override {
     struct req_state* s = get_state();
     for (const auto& iter : objs) {
 
@@ -1320,8 +1398,14 @@ public:
 			     << " (" << sref << ")" << ""
 			     << dendl;
 
-      /* call me maybe */
-      this->operator()(sref, sref, RGW_FS_TYPE_FILE);
+      if(! this->operator()(sref, next_marker, RGW_FS_TYPE_FILE)) {
+	/* caller cannot accept more */
+	lsubdout(cct, rgw, 5) << "readdir rcb failed"
+			      << " dirent=" << sref.data()
+			      << " call count=" << ix
+			      << dendl;
+	return;
+      }
       ++ix;
     }
     for (auto& iter : common_prefixes) {
@@ -1354,7 +1438,7 @@ public:
 			     << " cpref=" << sref
 			     << dendl;
 
-      this->operator()(sref, sref, RGW_FS_TYPE_DIRECTORY);
+      this->operator()(sref, next_marker, RGW_FS_TYPE_DIRECTORY);
       ++ix;
     }
   }
@@ -1374,29 +1458,28 @@ public:
 }; /* RGWReaddirRequest */
 
 /*
-  create bucket
+  dir has-children predicate (bucket objects)
 */
 
-class RGWCreateBucketRequest : public RGWLibRequest,
-			       public RGWCreateBucket /* RGWOp */
+class RGWRMdirCheck : public RGWLibRequest,
+		      public RGWListBucket /* RGWOp */
 {
 public:
-  std::string& uri;
+  const RGWFileHandle* rgw_fh;
+  bool valid;
+  bool has_children;
 
-  RGWCreateBucketRequest(CephContext* _cct, RGWUserInfo *_user,
-			std::string& _uri)
-    : RGWLibRequest(_cct, _user), uri(_uri) {
+  RGWRMdirCheck (CephContext* _cct, RGWUserInfo *_user,
+		 const RGWFileHandle* _rgw_fh)
+    : RGWLibRequest(_cct, _user), rgw_fh(_rgw_fh), valid(false),
+      has_children(false) {
+    default_max = 2;
     op = this;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return true; }
 
-  virtual int read_permissions(RGWOp* op_obj) {
-    /* we ARE a 'create bucket' request (cf. rgw_rest.cc, ll. 1305-6) */
-    return 0;
-  }
-
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1407,12 +1490,97 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
+    struct req_state* s = get_state();
+    s->info.method = "GET";
+    s->op = OP_GET;
+
+    std::string uri = "/" + rgw_fh->bucket_name() + "/";
+    s->relative_uri = uri;
+    s->info.request_uri = uri;
+    s->info.effective_uri = uri;
+    s->info.request_params = "";
+    s->info.domain = ""; /* XXX ? */
+
+    s->user = user;
+
+    prefix = rgw_fh->relative_object_name();
+    if (prefix.length() > 0)
+      prefix += "/";
+    delimiter = '/';
+
+    return 0;
+  }
+
+  int get_params() override {
+    max = default_max;
+    return 0;
+  }
+
+  void send_response() override {
+    valid = true;
+    if ((objs.size() > 1) ||
+	(! objs.empty() &&
+	 (objs.front().key.name != prefix))) {
+      has_children = true;
+      return;
+    }
+    for (auto& iter : common_prefixes) {
+      /* readdir never produces a name for this case */
+      if (iter.first == "/")
+	continue;
+      has_children = true;
+      break;
+    }
+  }
+
+  virtual void send_versioned_response() {
+    send_response();
+  }
+
+}; /* RGWRMdirCheck */
+
+/*
+  create bucket
+*/
+
+class RGWCreateBucketRequest : public RGWLibRequest,
+			       public RGWCreateBucket /* RGWOp */
+{
+public:
+  const std::string& bucket_name;
+
+  RGWCreateBucketRequest(CephContext* _cct, RGWUserInfo *_user,
+			std::string& _bname)
+    : RGWLibRequest(_cct, _user), bucket_name(_bname) {
+    op = this;
+  }
+
+  bool only_bucket() override { return false; }
+
+  int read_permissions(RGWOp* op_obj) override {
+    /* we ARE a 'create bucket' request (cf. rgw_rest.cc, ll. 1305-6) */
+    return 0;
+  }
+
+  int op_init() override {
+    // assign store, s, and dialect_handler
+    RGWObjectCtx* rados_ctx
+      = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
+    // framework promises to call op_init after parent init
+    assert(rados_ctx);
+    RGWOp::init(rados_ctx->store, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "PUT";
     s->op = OP_PUT;
 
+    string uri = "/" + bucket_name;
     /* XXX derp derp derp */
     s->relative_uri = uri;
     s->info.request_uri = uri; // XXX
@@ -1426,7 +1594,7 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     struct req_state* s = get_state();
     RGWAccessControlPolicy_S3 s3policy(s->cct);
     /* we don't have (any) headers, so just create canned ACLs */
@@ -1435,7 +1603,7 @@ public:
     return ret;
   }
 
-  virtual void send_response() {
+  void send_response() override {
     /* TODO: something (maybe) */
   }
 }; /* RGWCreateBucketRequest */
@@ -1448,17 +1616,17 @@ class RGWDeleteBucketRequest : public RGWLibRequest,
 			       public RGWDeleteBucket /* RGWOp */
 {
 public:
-  std::string& uri;
+  const std::string& bucket_name;
 
   RGWDeleteBucketRequest(CephContext* _cct, RGWUserInfo *_user,
-			std::string& _uri)
-    : RGWLibRequest(_cct, _user), uri(_uri) {
+			std::string& _bname)
+    : RGWLibRequest(_cct, _user), bucket_name(_bname) {
     op = this;
   }
 
-  virtual bool only_bucket() { return true; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1469,12 +1637,13 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "DELETE";
     s->op = OP_DELETE;
 
+    string uri = "/" + bucket_name;
     /* XXX derp derp derp */
     s->relative_uri = uri;
     s->info.request_uri = uri; // XXX
@@ -1488,7 +1657,7 @@ public:
     return 0;
   }
 
-  virtual void send_response() {}
+  void send_response() override {}
 
 }; /* RGWDeleteBucketRequest */
 
@@ -1512,9 +1681,9 @@ public:
     op = this;
   }
 
-  virtual bool only_bucket() { return true; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1523,13 +1692,14 @@ public:
     RGWOp::init(rados_ctx->store, get_state(), this);
     op = this; // assign self as op: REQUIRED
 
-    if (! valid_s3_object_name(obj_name))
-      return -ERR_INVALID_OBJECT_NAME;
+    int rc = valid_s3_object_name(obj_name);
+    if (rc != 0)
+      return rc;
 
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "PUT";
@@ -1552,7 +1722,7 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     struct req_state* s = get_state();
     RGWAccessControlPolicy_S3 s3policy(s->cct);
     /* we don't have (any) headers, so just create canned ACLs */
@@ -1561,7 +1731,7 @@ public:
     return ret;
   }
 
-  virtual int get_data(buffer::list& _bl) {
+  int get_data(buffer::list& _bl) override {
     /* XXX for now, use sharing semantics */
     _bl.claim(bl);
     uint32_t len = _bl.length();
@@ -1569,9 +1739,9 @@ public:
     return len;
   }
 
-  virtual void send_response() {}
+  void send_response() override {}
 
-  virtual int verify_params() {
+  int verify_params() override {
     if (bl.length() > cct->_conf->rgw_max_put_size)
       return -ERR_TOO_LARGE;
     return 0;
@@ -1608,9 +1778,9 @@ public:
     RGWGetObj::end = off + len;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return false; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1621,7 +1791,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "GET";
@@ -1641,12 +1811,12 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     return 0;
   }
 
-  virtual int send_response_data(ceph::buffer::list& bl, off_t bl_off,
-				off_t bl_len) {
+  int send_response_data(ceph::buffer::list& bl, off_t bl_off,
+                         off_t bl_len) override {
     size_t bytes;
     for (auto& bp : bl.buffers()) {
       /* if for some reason bl_off indicates the start-of-data is not at
@@ -1668,7 +1838,7 @@ public:
     return 0;
   }
 
-  virtual int send_response_data_error() {
+  int send_response_data_error() override {
     /* S3 implementation just sends nothing--there is no side effect
      * to simulate here */
     return 0;
@@ -1693,9 +1863,9 @@ public:
     op = this;
   }
 
-  virtual bool only_bucket() { return true; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1706,7 +1876,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "DELETE";
@@ -1726,7 +1896,7 @@ public:
     return 0;
   }
 
-  virtual void send_response() {}
+  void send_response() override {}
 
 }; /* RGWDeleteObjRequest */
 
@@ -1756,8 +1926,8 @@ public:
     RGWGetObj::end = UINT64_MAX;
   }
 
-  virtual const string name() { return "stat_obj"; }
-  virtual RGWOpType get_type() { return RGW_OP_STAT_OBJ; }
+  const string name() override { return "stat_obj"; }
+  RGWOpType get_type() override { return RGW_OP_STAT_OBJ; }
 
   real_time get_mtime() const {
     return lastmod;
@@ -1774,9 +1944,9 @@ public:
     return (iter != attrs.end()) ? &(iter->second) : nullptr;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return false; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1787,7 +1957,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "GET";
@@ -1806,23 +1976,23 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     return 0;
   }
 
-  virtual int send_response_data(ceph::buffer::list& _bl, off_t s_off,
-				off_t e_off) {
+  int send_response_data(ceph::buffer::list& _bl, off_t s_off,
+                         off_t e_off) override {
     /* NOP */
     /* XXX save attrs? */
     return 0;
   }
 
-  virtual int send_response_data_error() {
+  int send_response_data_error() override {
     /* NOP */
     return 0;
   }
 
-  virtual void execute() {
+  void execute() override {
     RGWGetObj::execute();
     _size = get_state()->obj_size;
   }
@@ -1835,10 +2005,12 @@ class RGWStatBucketRequest : public RGWLibRequest,
 public:
   std::string uri;
   std::map<std::string, buffer::list> attrs;
+  RGWLibFS::BucketStats& bs;
 
   RGWStatBucketRequest(CephContext* _cct, RGWUserInfo *_user,
-		       const std::string& _path)
-    : RGWLibRequest(_cct, _user) {
+		       const std::string& _path,
+		       RGWLibFS::BucketStats& _stats)
+    : RGWLibRequest(_cct, _user), bs(_stats) {
     uri = "/" + _path;
     op = this;
   }
@@ -1852,9 +2024,9 @@ public:
     return bucket.creation_time;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return false; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1865,7 +2037,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "GET";
@@ -1888,8 +2060,12 @@ public:
     return 0;
   }
 
-  virtual void send_response() {
+  void send_response() override {
     bucket.creation_time = get_state()->bucket_info.creation_time;
+    bs.size = bucket.size;
+    bs.size_rounded = bucket.size_rounded;
+    bs.creation_time = bucket.creation_time;
+    bs.num_entries = bucket.count;
     std::swap(attrs, get_state()->bucket_attrs);
   }
 
@@ -1917,9 +2093,9 @@ public:
     op = this;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -1930,7 +2106,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "GET";
@@ -1956,12 +2132,12 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     max = default_max;
     return 0;
   }
 
-  virtual void send_response() {
+  void send_response() override {
     struct req_state* s = get_state();
     // try objects
     for (const auto& iter : objs) {
@@ -2011,7 +2187,10 @@ public:
   const std::string& bucket_name;
   const std::string& obj_name;
   RGWFileHandle* rgw_fh;
-  RGWPutObjProcessor *processor;
+  RGWPutObjProcessor* processor;
+  RGWPutObjDataProcessor* filter;
+  boost::optional<RGWPutObj_Compress> compressor;
+  CompressorRef plugin;
   buffer::list data;
   uint64_t timer_id;
   MD5 hash;
@@ -2023,8 +2202,8 @@ public:
   RGWWriteRequest(CephContext* _cct, RGWUserInfo *_user, RGWFileHandle* _fh,
 		  const std::string& _bname, const std::string& _oname)
     : RGWLibContinuedReq(_cct, _user), bucket_name(_bname), obj_name(_oname),
-      rgw_fh(_fh), processor(nullptr), real_ofs(0), bytes_written(0),
-      multipart(false), eio(false) {
+      rgw_fh(_fh), processor(nullptr), filter(nullptr), real_ofs(0),
+      bytes_written(0), multipart(false), eio(false) {
 
     int ret = header_init();
     if (ret == 0) {
@@ -2033,9 +2212,9 @@ public:
     op = this;
   }
 
-  virtual bool only_bucket() { return true; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -2046,7 +2225,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "PUT";
@@ -2066,8 +2245,8 @@ public:
     return 0;
   }
 
-  virtual RGWPutObjProcessor *select_processor(RGWObjectCtx& obj_ctx,
-					       bool *is_multipart) {
+  RGWPutObjProcessor *select_processor(RGWObjectCtx& obj_ctx,
+                                       bool *is_multipart) override {
     struct req_state* s = get_state();
     uint64_t part_size = s->cct->_conf->rgw_obj_stripe_size;
     RGWPutObjProcessor_Atomic *processor =
@@ -2079,7 +2258,7 @@ public:
     return processor;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     struct req_state* s = get_state();
     RGWAccessControlPolicy_S3 s3policy(s->cct);
     /* we don't have (any) headers, so just create canned ACLs */
@@ -2088,7 +2267,7 @@ public:
     return ret;
   }
 
-  virtual int get_data(buffer::list& _bl) {
+  int get_data(buffer::list& _bl) override {
     /* XXX for now, use sharing semantics */
     uint32_t len = data.length();
     _bl.claim(data);
@@ -2105,13 +2284,13 @@ public:
     ofs = off; /* consumed in exec_continue() */
   }
 
-  virtual int exec_start();
-  virtual int exec_continue();
-  virtual int exec_finish();
+  int exec_start() override;
+  int exec_continue() override;
+  int exec_finish() override;
 
-  virtual void send_response() {}
+  void send_response() override {}
 
-  virtual int verify_params() {
+  int verify_params() override {
     return 0;
   }
 }; /* RGWWriteRequest */
@@ -2140,9 +2319,9 @@ public:
     attrs_mod = RGWRados::ATTRSMOD_MERGE;
   }
 
-  virtual bool only_bucket() { return true; }
+  bool only_bucket() override { return true; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -2154,7 +2333,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "PUT"; // XXX check
@@ -2162,22 +2341,22 @@ public:
 
     src_bucket_name = src_parent->bucket_name();
     // need s->src_bucket_name?
-    src_object.name = src_parent->format_child_name(src_name);
+    src_object.name = src_parent->format_child_name(src_name, false);
     // need s->src_object?
 
     dest_bucket_name = dst_parent->bucket_name();
     // need s->bucket.name?
-    dest_object = dst_parent->format_child_name(dst_name);
+    dest_object = dst_parent->format_child_name(dst_name, false);
     // need s->object_name?
 
-    if (! valid_s3_object_name(dest_object))
-      return -ERR_INVALID_OBJECT_NAME;
+    int rc = valid_s3_object_name(dest_object);
+    if (rc != 0)
+      return rc;
 
     /* XXX and fixup key attr (could optimize w/string ref and
      * dest_object) */
     buffer::list ux_key;
-    std::string key_name{dst_parent->make_key_name(dst_name.c_str())};
-    fh_key fhk = dst_parent->make_fhk(key_name);
+    fh_key fhk = dst_parent->make_fhk(dst_name);
     rgw::encode(fhk, ux_key);
     emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
 
@@ -2195,7 +2374,7 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     struct req_state* s = get_state();
     RGWAccessControlPolicy_S3 s3policy(s->cct);
     /* we don't have (any) headers, so just create canned ACLs */
@@ -2204,8 +2383,8 @@ public:
     return ret;
   }
 
-  virtual void send_response() {}
-  virtual void send_partial_response(off_t ofs) {}
+  void send_response() override {}
+  void send_partial_response(off_t ofs) override {}
 
 }; /* RGWCopyObjRequest */
 
@@ -2222,9 +2401,9 @@ public:
     op = this;
   }
 
-  virtual bool only_bucket() { return false; }
+  bool only_bucket() override { return false; }
 
-  virtual int op_init() {
+  int op_init() override {
     // assign store, s, and dialect_handler
     RGWObjectCtx* rados_ctx
       = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
@@ -2235,7 +2414,7 @@ public:
     return 0;
   }
 
-  virtual int header_init() {
+  int header_init() override {
 
     struct req_state* s = get_state();
     s->info.method = "PUT";
@@ -2255,11 +2434,11 @@ public:
     return 0;
   }
 
-  virtual int get_params() {
+  int get_params() override {
     return 0;
   }
 
-  virtual void send_response() {}
+  void send_response() override {}
 
 }; /* RGWSetAttrsRequest */
 
