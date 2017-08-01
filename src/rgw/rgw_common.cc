@@ -194,6 +194,7 @@ req_state::req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u)
   formatter = NULL;
   bucket_acl = NULL;
   object_acl = NULL;
+  bucket_policy.init(this);
   expect_cont = false;
   aws4_auth_needs_complete = false;
   aws4_auth_streaming_mode = false;
@@ -886,8 +887,8 @@ bool verify_bucket_permission(struct req_state * const s,
                               RGWAccessControlPolicy * const bucket_acl,
                               const int perm)
 {
-  if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_WRITE)) {
-    switch (s->bucket_policy.verify_permission(s)) {
+  if (!s->bucket_policy.empty() && (perm & s->perm_mask & (RGW_PERM_READ | RGW_PERM_WRITE))) {
+    switch (s->bucket_policy.verify_permission()) {
     case RGW_POLICY_ALLOW:
       return true;
     case RGW_POLICY_DENY:
@@ -931,7 +932,7 @@ bool verify_object_permission(struct req_state * const s,
                               const int perm)
 {
   if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_READ)) {
-    switch (s->bucket_policy.verify_permission(s)) {
+    switch (s->bucket_policy.verify_permission()) {
     case RGW_POLICY_ALLOW:
       if (s->cct->_conf->rgw_bucket_owner_share_any_by_policy || !object_acl
           || !bucket_acl->get_owner().get_id().compare(

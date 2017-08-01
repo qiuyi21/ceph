@@ -1147,35 +1147,6 @@ int RGWPutACLs_ObjStore::get_params()
   return op_ret;
 }
 
-int RGWPutBucketPolicy_ObjStore::get_params() {
-  size_t cl = 0;
-  if (s->length) {
-    cl = atoll(s->length);
-    if (cl > s->cct->_conf->rgw_bucket_policy_max_length) {
-      op_ret = -ERR_TOO_LARGE;
-      return op_ret;
-    }
-  }
-  if (cl) {
-    data = (char *) malloc(cl + 1);
-    if (!data) {
-      op_ret = -ENOMEM;
-      return op_ret;
-    }
-    int read_len;
-    int r = STREAM_IO(s)->read(data, cl, &read_len,
-        s->aws4_auth_needs_complete);
-    len = read_len;
-    if (r < 0)
-      return r;
-    data[len] = '\0';
-  } else {
-    len = 0;
-  }
-
-  return op_ret;
-}
-
 static int read_all_chunked_input(req_state *s, char **pdata, int *plen,
 				  int max_read)
 {

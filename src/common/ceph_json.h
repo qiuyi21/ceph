@@ -99,7 +99,6 @@ public:
 
   const char *get_json() { return json_buffer.c_str(); }
   void set_failure() { success = false; }
-  bool is_success() { return success; }
 };
 
 

@@ -291,23 +291,12 @@ public:
 };
 
 class RGWPutBucketPolicy_ObjStore: public RGWPutBucketPolicy {
-public:
-  RGWPutBucketPolicy_ObjStore() {}
-  ~RGWPutBucketPolicy_ObjStore() {}
-
-  virtual int get_params();
 };
 
 class RGWGetBucketPolicy_ObjStore: public RGWGetBucketPolicy {
-public:
-  RGWGetBucketPolicy_ObjStore() {}
-  ~RGWGetBucketPolicy_ObjStore() {}
 };
 
 class RGWDelBucketPolicy_ObjStore: public RGWDelBucketPolicy {
-public:
-  RGWDelBucketPolicy_ObjStore() {}
-  ~RGWDelBucketPolicy_ObjStore() {}
 };
 
 class RGWGetCORS_ObjStore : public RGWGetCORS {

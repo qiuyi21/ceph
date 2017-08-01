@@ -1619,41 +1619,22 @@ public:
 
 class RGWPutBucketPolicy: public RGWOp {
 protected:
-  size_t len;
-  char *data;
+  int get_json_input(RGWBucketPolicy& out, int maxlen, bool *empty = NULL);
 
 public:
-  RGWPutBucketPolicy() {
-    len = 0;
-    data = NULL;
-  }
-  ~RGWPutBucketPolicy() {
-    if (data) free(data);
-  }
-
   int verify_permission();
   void pre_exec();
   void execute();
-
-  virtual int get_params() = 0;
-  virtual void send_response() = 0;
   virtual const string name() { return "put_bucket_policy"; }
   virtual RGWOpType get_type() { return RGW_OP_PUT_BUCKET_POLICY; }
   virtual uint32_t op_mask() { return RGW_OP_TYPE_WRITE; }
 };
 
 class RGWGetBucketPolicy: public RGWOp {
-protected:
-  string policy;
-
 public:
-  RGWGetBucketPolicy() {}
-
   int verify_permission();
   void pre_exec();
   void execute();
-
-  virtual void send_response() = 0;
   virtual const string name() { return "get_bucket_policy"; }
   virtual RGWOpType get_type() { return RGW_OP_GET_BUCKET_POLICY; }
   virtual uint32_t op_mask() { return RGW_OP_TYPE_READ; }
@@ -1661,13 +1642,8 @@ public:
 
 class RGWDelBucketPolicy: public RGWOp {
 public:
-  RGWDelBucketPolicy() {}
-
   int verify_permission();
-  void pre_exec() {}
   void execute();
-
-  virtual void send_response() = 0;
   virtual const string name() { return "del_bucket_policy"; }
   virtual RGWOpType get_type(){ return RGW_OP_DELETE_BUCKET_POLICY; }
   virtual uint32_t op_mask(){ return RGW_OP_TYPE_WRITE; }

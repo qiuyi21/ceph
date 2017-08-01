@@ -196,22 +196,24 @@ static int get_obj_policy_from_attr(CephContext *cct, RGWRados *store, RGWObject
   return ret;
 }
 
-static int get_s3_bucket_policy_from_attr(CephContext *cct,
+static int get_s3_bucket_policy_from_attr(RGWRados *store,
     map<string, bufferlist>& bucket_attrs, RGWBucketPolicy& bktpol) {
+  int ret = 0;
   map<string, bufferlist>::iterator aiter = bucket_attrs.find(RGW_ATTR_POLICY);
 
   if (aiter != bucket_attrs.end()) {
     bufferlist::iterator iter = aiter->second.begin();
     try {
-      bktpol.decode(iter);
+      ret = bktpol.decode(iter, store);
     } catch (buffer::error& err) {
-      ldout(cct, 0) << "ERROR: could not decode bucket policy, caught buffer::error" << dendl;
+      ldout(store->ctx(), 0) << "ERROR: could not decode bucket policy, caught buffer::error" << dendl;
       return -EIO;
     }
-    ldout(cct, 15) << "Read RGWBucketPolicy " << bktpol.tojson() << dendl;
-  }
+    ldout(store->ctx(), 15) << "Read RGWBucketPolicy " << bktpol.tojson() << dendl;
+  } else
+    bktpol.clear();
 
-  return 0;
+  return ret;
 }
 
 
@@ -309,8 +311,10 @@ static int read_policy(RGWRados *store, struct req_state *s,
       ret = -ERR_NO_SUCH_BUCKET;
   }
 
-  if (ret >= 0 && object.empty())
-    ret = get_s3_bucket_policy_from_attr(s->cct, bucket_attrs, s->bucket_policy);
+  if (ret >= 0 && object.empty()) {
+    s->bucket_policy.init(s, &bucket.name);
+    ret = get_s3_bucket_policy_from_attr(store, bucket_attrs, s->bucket_policy);
+  }
 
   return ret;
 }
@@ -3422,7 +3426,7 @@ int RGWCopyObj::verify_permission()
       hasperm = false;
       if (!s->bucket_policy.empty() && (s->perm_mask & RGW_PERM_READ)) {
         switch (s->bucket_policy.verify_permission(s->user, RGW_OP_GET_OBJ,
-            src_bucket.name, src_object)) {
+            src_object.name)) {
         case RGW_POLICY_ALLOW:
           if (s->cct->_conf->rgw_bucket_owner_share_any_by_policy
               || !src_bucket_acl.get_owner().get_id().compare(
@@ -3479,7 +3483,7 @@ int RGWCopyObj::verify_permission()
     hasperm = false;
     if (!s->bucket_policy.empty() && (s->perm_mask & RGW_PERM_WRITE)) {
       switch (s->bucket_policy.verify_permission(s->user, RGW_OP_PUT_OBJ,
-          dest_bucket.name, dest_object)) {
+          dest_object)) {
       case RGW_POLICY_ALLOW:
         hasperm = true;
         break;
@@ -4648,7 +4652,7 @@ void RGWDeleteMultiObj::execute()
         ++iter, num_processed++) {
     if (!s->bucket_policy.empty()) {
       noperm = 1;
-      switch (s->bucket_policy.verify_permission(s->user, RGW_OP_DELETE_OBJ, s->bucket_name, *iter)) {
+      switch (s->bucket_policy.verify_permission(s->user, RGW_OP_DELETE_OBJ, iter->name)) {
       case RGW_POLICY_ALLOW:
         noperm = 0;
         break;
@@ -4949,34 +4953,70 @@ void RGWPutBucketPolicy::pre_exec() {
 }
 
 void RGWPutBucketPolicy::execute() {
-  bufferlist bl;
-  rgw_obj obj;
-
-  op_ret = get_params();
-  if (op_ret < 0)
-    return;
-
   if (!s->object.empty()) {
     op_ret = -EPERM;
     return;
   }
 
-  ldout(s->cct, 15) << "read len=" << len << " data=" << (data ? data : "") << dendl;
-
-  if (!data || !data[0]
-      || !RGWBucketPolicy::is_valid_json(data, s->bucket_name)) {
-    op_ret = -ERR_MALFORMED_POLICY;
+  int maxlen = s->cct->_conf->rgw_bucket_policy_max_length;
+  RGWBucketPolicy pol(s);
+  op_ret = get_json_input(pol, maxlen);
+  if (op_ret < 0) {
+    if (op_ret == -ERANGE) {
+      op_ret = -ERR_TOO_LARGE;
+      stringstream ss;
+      ss << "Normalized policy document exceeds the maximum allowed size of " << maxlen << " bytes";
+      s->err.message = ss.str();
+    } else
+      op_ret = -ERR_MALFORMED_POLICY;
     return;
   }
 
-  RGWBucketPolicy(data).encode(bl);
-  obj = rgw_obj(s->bucket, s->object);
+  bufferlist bl;
+  ::encode(pol, bl);
+
+  rgw_obj obj;
+  store->get_bucket_instance_obj(s->bucket, obj);
   store->set_atomic(s->obj_ctx, obj);
 
   map<string, bufferlist> attrs = s->bucket_attrs;
   attrs[RGW_ATTR_POLICY] = bl;
   op_ret = rgw_bucket_set_attrs(store, s->bucket_info, attrs,
       &s->bucket_info.objv_tracker);
+}
+
+int RGWPutBucketPolicy::get_json_input(RGWBucketPolicy& out, int maxlen, bool *empty) {
+  int data_len = 0;
+  char *data = NULL;
+
+  if (empty) *empty = false;
+
+  int rv = rgw_rest_read_all_input(s, &data, &data_len, maxlen);
+  if (rv < 0) return rv;
+
+  if (!data_len) {
+    if (empty) *empty = true;
+    if (data) free(data);
+    return -EINVAL;
+  }
+
+  ldout(s->cct, 15) << "read len=" << data_len << " data=" << data << dendl;
+
+  JSONParser parser;
+  if (!parser.parse(data, data_len)) {
+    free(data);
+    return -EINVAL;
+  }
+  free(data);
+
+  try {
+    decode_json_obj(out, &parser);
+  } catch (JSONDecoder::err& e) {
+    s->err.message = e.message;
+    return -EINVAL;
+  }
+
+  return 0;
 }
 
 int RGWGetBucketPolicy::verify_permission() {
@@ -4991,15 +5031,10 @@ void RGWGetBucketPolicy::pre_exec() {
 }
 
 void RGWGetBucketPolicy::execute() {
-  if (!s->object.empty()) {
+  if (!s->object.empty())
     op_ret = -EPERM;
-    return;
-  }
-
-  if (!s->bucket_policy.empty())
-    policy = s->bucket_policy.tojson();
-  else
-    op_ret = -ENOENT;
+  else if (s->bucket_policy.empty())
+    op_ret = -ERR_NO_SUCH_BUCKET_POLICY;
 }
 
 int RGWDelBucketPolicy::verify_permission() {
@@ -5010,19 +5045,16 @@ int RGWDelBucketPolicy::verify_permission() {
 }
 
 void RGWDelBucketPolicy::execute() {
-  bufferlist bl;
-  rgw_obj obj;
-
   if (!s->object.empty()) {
     op_ret = -EPERM;
     return;
-  }
-
-  if (s->bucket_policy.empty()) {
+  } else if (s->bucket_policy.empty()) {
     dout(2) << "No bucket policy set yet for this bucket" << dendl;
-    op_ret = -ENOENT;
+    op_ret = -ERR_NO_SUCH_BUCKET_POLICY;
     return;
   }
+
+  rgw_obj obj;
   store->get_bucket_instance_obj(s->bucket, obj);
   store->set_atomic(s->obj_ctx, obj);
 

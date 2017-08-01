@@ -2358,39 +2358,34 @@ void RGWPutACLs_ObjStore_S3::send_response()
 }
 
 void RGWPutBucketPolicy_ObjStore_S3::send_response() {
-  int r = op_ret;
-  if (!r)
-    r = STATUS_NO_CONTENT;
-
-  set_req_state_err(s, r);
+  if (!op_ret)
+    op_ret = STATUS_NO_CONTENT;
+  set_req_state_err(s, op_ret);
   dump_errno(s);
-  end_header(s, NULL);
+  end_header(s);
 }
 
 void RGWGetBucketPolicy_ObjStore_S3::send_response() {
-  int r = op_ret;
-  if (r) {
-    if (r == -ENOENT)
-      r = ERR_NO_SUCH_BUCKET_POLICY;
-    set_req_state_err(s, r);
+  set_req_state_err(s, op_ret);
+  dump_errno(s);
+
+  if (op_ret < 0) {
+    end_header(s);
+    return;
   }
 
-  dump_errno(s);
-  end_header(s, this, "application/json");
-  dump_start(s);
-  if (!r) {
-    STREAM_IO(s)->write(policy.c_str(), policy.size());
-  }
+  JSONFormatter jf(false);
+  encode_json("", s->bucket_policy, &jf);
+  end_header(s, NULL, "application/json", jf.get_len());
+  rgw_flush_formatter(s, &jf);
 }
 
 void RGWDelBucketPolicy_ObjStore_S3::send_response() {
-  int r = op_ret;
-  if (!r || r == -ENOENT)
-    r = STATUS_NO_CONTENT;
-
-  set_req_state_err(s, r);
+  if (!op_ret || op_ret == -ERR_NO_SUCH_BUCKET_POLICY)
+    op_ret = STATUS_NO_CONTENT;
+  set_req_state_err(s, op_ret);
   dump_errno(s);
-  end_header(s, NULL);
+  end_header(s);
 }
 
 void RGWGetCORS_ObjStore_S3::send_response()

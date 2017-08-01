@@ -259,25 +259,16 @@ public:
 
 class RGWGetBucketPolicy_ObjStore_S3: public RGWGetBucketPolicy_ObjStore {
 public:
-  RGWGetBucketPolicy_ObjStore_S3() {}
-  ~RGWGetBucketPolicy_ObjStore_S3() {}
-
   void send_response();
 };
 
 class RGWPutBucketPolicy_ObjStore_S3: public RGWPutBucketPolicy_ObjStore {
 public:
-  RGWPutBucketPolicy_ObjStore_S3() {}
-  ~RGWPutBucketPolicy_ObjStore_S3() {}
-
   void send_response();
 };
 
 class RGWDelBucketPolicy_ObjStore_S3: public RGWDelBucketPolicy_ObjStore {
 public:
-  RGWDelBucketPolicy_ObjStore_S3() {}
-  ~RGWDelBucketPolicy_ObjStore_S3() {}
-
   void send_response();
 };
 
