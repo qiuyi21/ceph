@@ -21,6 +21,7 @@
 #include "rgw_client_io.h"
 #include "common/errno.h"
 #include "include/assert.h"
+#include "rgw_access_policy_s3.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -56,9 +57,19 @@ RGWOp* RGWHandler_Config::op_get() {
   bool exists;
   string type = s->info.args.get("type", &exists);
 
+  if (!type.compare("access-policy"))
+    return new RGWOp_AccessPolicy_Get;
+
   if (type.compare("zonegroup-map") == 0) {
     return new RGWOp_ZoneGroupMap_Get(false);
   } else {
     return new RGWOp_ZoneGroupMap_Get(true);
   }
+}
+
+RGWOp* RGWHandler_Config::op_put() {
+  string type = s->info.args.get("type");
+  if (!type.compare("access-policy"))
+    return new RGWOp_AccessPolicy_Set;
+  return NULL;
 }

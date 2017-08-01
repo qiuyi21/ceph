@@ -1367,6 +1367,7 @@ bool RGWUserCaps::is_valid_cap_type(const string& tp)
                                     "bilog",
                                     "mdlog",
                                     "datalog",
+                                    "accpol",
                                     "opstate" };
 
   for (unsigned int i = 0; i < sizeof(cap_type) / sizeof(char *); ++i) {

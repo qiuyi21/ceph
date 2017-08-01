@@ -19,6 +19,7 @@
 #include "rgw_swift_auth.h"
 #include "rgw_cors_s3.h"
 #include "rgw_http_errors.h"
+#include "rgw_access_policy_s3.h"
 #include "rgw_lib.h"
 
 #include "rgw_client_io.h"
@@ -1951,6 +1952,16 @@ RGWHandler_REST* RGWREST::get_handler(RGWRados *store, struct req_state *s,
   RGWHandler_REST* handler;
 
   *init_error = preprocess(s, sio);
+  if (*init_error < 0)
+    return NULL;
+
+  RGWAccessPolicy pol;
+  *init_error = pol.init(store);
+  if (*init_error < 0 && *init_error != -ENOENT) {
+    *init_error = -ERR_INTERNAL_ERROR;
+    return NULL;
+  }
+  *init_error = pol.check(s);
   if (*init_error < 0)
     return NULL;
 

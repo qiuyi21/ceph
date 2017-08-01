@@ -157,13 +157,18 @@ void RGWMongoose::init_env(CephContext *cct)
   env.set("REMOTE_USER", info->remote_user);
   env.set("SCRIPT_URI", info->uri); /* FIXME */
 
+  char buf[16];
+  /* FIXME: not support IPv6 */
+  uint32_t ip = (uint32_t) info->remote_ip;
+  snprintf(buf, sizeof(buf), "%hhu.%hhu.%hhu.%hhu", ip >> 24, ip >> 16, ip >> 8, ip);
+  env.set("REMOTE_ADDR", buf);
+
   if (port <= 0)
     lderr(cct) << "init_env: bug: invalid port number" << dendl;
-  char port_buf[16];
-  snprintf(port_buf, sizeof(port_buf), "%d", port);
-  env.set("SERVER_PORT", port_buf);
+  snprintf(buf, sizeof(buf), "%hu", port);
+  env.set("SERVER_PORT", buf);
   if (info->is_ssl) {
-    env.set("SERVER_PORT_SECURE", port_buf);
+    env.set("SERVER_PORT_SECURE", buf);
   }
 }
 

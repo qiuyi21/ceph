@@ -39,6 +39,7 @@ public:
 class RGWHandler_Config : public RGWHandler_Auth_S3 {
 protected:
   RGWOp *op_get();
+  RGWOp *op_put();
 
   int read_permissions(RGWOp*) {
     return 0;
