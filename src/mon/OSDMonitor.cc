@@ -3044,9 +3044,8 @@ void OSDMonitor::get_health(list<pair<health_status_t,string> >& summary,
     }
 
     // Not using 'sortbitwise' and should be?
-    if (g_conf->mon_warn_on_no_sortbitwise &&
-	!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE) &&
-	(osdmap.get_features(CEPH_ENTITY_TYPE_OSD, NULL) &
+    if (!osdmap.test_flag(CEPH_OSDMAP_SORTBITWISE) &&
+        (osdmap.get_up_osd_features() &
 	 CEPH_FEATURE_OSD_BITWISE_HOBJ_SORT)) {
       ostringstream ss;
       ss << "no legacy OSD present but 'sortbitwise' flag is not set";
@@ -5743,7 +5742,11 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       int id = newcrush.get_item_id(name);
 
       if (!newcrush.check_item_loc(g_ceph_context, id, loc, (int *)NULL)) {
-	err = newcrush.move_bucket(g_ceph_context, id, loc);
+	if (id >= 0) {
+	  err = newcrush.create_or_move_item(g_ceph_context, id, 0, name, loc);
+	} else {
+	  err = newcrush.move_bucket(g_ceph_context, id, loc);
+	}
 	if (err >= 0) {
 	  ss << "moved item id " << id << " name '" << name << "' to location " << loc << " in crush map";
 	  pending_inc.crush.clear();

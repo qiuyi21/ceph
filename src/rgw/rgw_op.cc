@@ -438,7 +438,8 @@ int rgw_build_object_policies(RGWRados *store, struct req_state *s,
     }
     s->object_acl = new RGWAccessControlPolicy(s->cct);
 
-    rgw_obj obj(s->bucket, s->object);
+    rgw_obj obj(s->bucket, s->object.name);
+    obj.set_instance(s->object.instance);
       
     store->set_atomic(s->obj_ctx, obj);
     if (prefetch_data) {
@@ -750,7 +751,9 @@ int RGWGetObj::read_user_manifest_part(rgw_bucket& bucket,
   if (op_ret < 0)
     return op_ret;
 
-  if (!verify_object_permission(s, bucket_policy, &obj_policy, RGW_PERM_READ)) {
+  if (s->system_request) {
+    ldout(s->cct, 2) << "overriding permissions due to system operation" << dendl;
+  } else if (!verify_object_permission(s, bucket_policy, &obj_policy, RGW_PERM_READ)) {
     return -EPERM;
   }
 
@@ -1301,7 +1304,7 @@ void RGWGetObj::execute()
     return;
   }
   attr_iter = attrs.find(RGW_ATTR_SLO_MANIFEST);
-  if (attr_iter != attrs.end()) {
+  if (attr_iter != attrs.end() && !skip_manifest) {
     is_slo = true;
     op_ret = handle_slo_manifest(attr_iter->second);
     if (op_ret < 0) {
@@ -4580,9 +4583,10 @@ void RGWListBucketMultiparts::execute()
 
 void RGWGetHealthCheck::execute()
 {
-  if (! g_conf->rgw_healthcheck_disabling_path.empty() &&
-      ::access(g_conf->rgw_healthcheck_disabling_path.c_str(), F_OK )) {
-    op_ret = -ERR_SERVICE_UNAVAILABLE;
+  if (!g_conf->rgw_healthcheck_disabling_path.empty() &&
+      (::access(g_conf->rgw_healthcheck_disabling_path.c_str(), F_OK) == 0)) {
+    /* Disabling path specified & existent in the filesystem. */
+    op_ret = -ERR_SERVICE_UNAVAILABLE; /* 503 */
   } else {
     op_ret = 0; /* 200 OK */
   }
@@ -4926,7 +4930,8 @@ void RGWSetAttrs::execute()
   if (op_ret < 0)
     return;
 
-  rgw_obj obj(s->bucket, s->object);
+  rgw_obj obj(s->bucket, s->object.name);
+  obj.set_instance(s->object.instance);
 
   store->set_atomic(s->obj_ctx, obj);
 
@@ -5076,6 +5081,29 @@ void RGWDelBucketPolicy::execute() {
 
   op_ret = rgw_bucket_set_attrs(store, s->bucket_info, attrs, &s->bucket_info.objv_tracker);
 }
+
+void RGWGetObjLayout::pre_exec()
+{
+  rgw_bucket_object_pre_exec(s);
+}
+
+void RGWGetObjLayout::execute()
+{
+  rgw_obj obj(s->bucket, s->object.name);
+  obj.set_instance(s->object.instance);
+  target = new RGWRados::Object(store, s->bucket_info, *static_cast<RGWObjectCtx *>(s->obj_ctx), obj);
+  RGWRados::Object::Read stat_op(target);
+
+  op_ret = stat_op.prepare(NULL, NULL);
+  if (op_ret < 0) {
+    return;
+  }
+
+  head_obj = stat_op.state.obj;
+
+  op_ret = target->get_manifest(&manifest);
+}
+
 
 RGWHandler::~RGWHandler()
 {
