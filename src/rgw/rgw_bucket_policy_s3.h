@@ -174,7 +174,7 @@ class RGWBucketPolicy {
   string id;
   vector<RGWPolicyStatement> statement;
 
-  int upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store);
+  int upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store, bool& valid);
 
 public:
   RGWBucketPolicy() : s(NULL) {}
