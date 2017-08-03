@@ -754,10 +754,11 @@ RGWBucketPolicy::RGWBucketPolicy(struct req_state *rs, const string *bucketname)
 int RGWBucketPolicy::decode(bufferlist::iterator& bl, RGWRados *store) {
   DECODE_START(2, bl);
   if (struct_v == 1) {    // upgrade
-    int ret = upgrade_from_v1(bl, store);
+    bool valid = false;
+    int ret = upgrade_from_v1(bl, store, valid);
     if (ret < 0) {
       ldout(store->ctx(), 0) << "upgrade bucket policy of " << bucket_name << " error " << ret << dendl;
-      return ret;
+      if (!valid) return ret;
     }
     break;
   }
@@ -832,7 +833,7 @@ string RGWBucketPolicy::tojson() {
   return os.str();
 }
 
-int RGWBucketPolicy::upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store) {
+int RGWBucketPolicy::upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store, bool& valid) {
   assert(store);
   assert(s);
 
@@ -852,6 +853,7 @@ int RGWBucketPolicy::upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store) 
   } catch (JSONDecoder::err& e) {
     return -ERR_MALFORMED_POLICY;
   }
+  valid = true;
 
   bufferlist polbl;
   encode(polbl);
