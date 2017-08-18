@@ -119,10 +119,15 @@ public:
   }
 
   WildStr& parse(const RGWUserInfo *user) {
-    size_t pos = 0;
-    while ((pos = ws.find("${aws:userid}", pos)) != string::npos) {
-      ws.replace(pos, 13, user->user_id.id);
-      pos += user->user_id.id.size();
+    static const string var_uid = "${aws:userid}";
+    size_t pos = ws.find(var_uid);
+    if (pos != string::npos) {
+      string uid;
+      user->user_id.to_str(uid);
+      do {
+        ws.replace(pos, var_uid.size(), uid);
+        pos += uid.size();
+      } while ((pos = ws.find(var_uid, pos)) != string::npos);
     }
     return *this;
   }
