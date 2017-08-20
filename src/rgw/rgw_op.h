@@ -514,9 +514,10 @@ public:
 class RGWStatBucket : public RGWOp {
 protected:
   RGWBucketEnt bucket;
+  int64_t max_size_kb;
 
 public:
-  RGWStatBucket() {}
+  RGWStatBucket() : max_size_kb(-2) {}
   ~RGWStatBucket() {}
 
   int verify_permission();
