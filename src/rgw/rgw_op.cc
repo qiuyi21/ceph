@@ -1740,6 +1740,33 @@ void RGWStatBucket::execute()
       op_ret = -EINVAL;
     }
   }
+
+  // only allow bucket owner get quota
+  if (op_ret < 0 || s->user->user_id.compare(s->bucket_owner.get_id()))
+    return;
+
+  if (s->bucket_info.quota.enabled)
+    bucket_quota = s->bucket_info.quota;
+  else if (s->user->bucket_quota.enabled)
+    bucket_quota = s->user->bucket_quota;
+  else
+    bucket_quota = store->get_bucket_quota();
+
+  if (s->user->user_quota.enabled)
+    user_quota = s->user->user_quota;
+  else
+    user_quota = store->get_user_quota();
+
+  if (bucket_quota.enabled)
+    max_size_kb = bucket_quota.max_size_kb < 0 ? -1 : bucket_quota.max_size_kb;
+  if (user_quota.enabled) {
+    int64_t kb = user_quota.max_size_kb;
+    if (max_size_kb >= 0) {
+      if (kb >= 0 && kb < max_size_kb)
+        max_size_kb = kb;
+    } else
+      max_size_kb = kb < 0 ? -1 : kb;
+  }
 }
 
 int RGWListBucket::verify_permission()

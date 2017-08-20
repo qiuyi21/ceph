@@ -856,19 +856,27 @@ void RGWGetBucketWebsite_ObjStore_S3::send_response()
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
-static void dump_bucket_metadata(struct req_state *s, RGWBucketEnt& bucket)
+static void dump_bucket_metadata(struct req_state *s, RGWBucketEnt& bucket, int64_t max_size_kb)
 {
   char buf[32];
   snprintf(buf, sizeof(buf), "%lld", (long long)bucket.count);
   STREAM_IO(s)->print("X-RGW-Object-Count: %s\r\n", buf);
   snprintf(buf, sizeof(buf), "%lld", (long long)bucket.size);
   STREAM_IO(s)->print("X-RGW-Bytes-Used: %s\r\n", buf);
+
+  if (max_size_kb >= -1) {
+    if (max_size_kb < 0)
+      strcpy(buf, "-1");
+    else
+      snprintf(buf, sizeof(buf), "%llu", (long long unsigned)max_size_kb * 1024);
+    STREAM_IO(s)->print("X-RGW-Bytes-Max: %s\r\n", buf);
+  }
 }
 
 void RGWStatBucket_ObjStore_S3::send_response()
 {
   if (op_ret >= 0) {
-    dump_bucket_metadata(s, bucket);
+    dump_bucket_metadata(s, bucket, max_size_kb);
   }
 
   set_req_state_err(s, op_ret);
