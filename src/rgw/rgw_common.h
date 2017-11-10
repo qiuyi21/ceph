@@ -1288,6 +1288,7 @@ struct req_state {
   RGWAccessControlPolicy *bucket_acl;
   RGWAccessControlPolicy *object_acl;
   RGWBucketPolicy bucket_policy;
+  string auth_id;   // Access Key Id
 
   bool system_request;
 

@@ -112,13 +112,13 @@ class RGWPolicyPrincipal {
   __u8 type;  // 1: AWS
   vector<string> name;
 
-  bool match(const struct RGWUserInfo *user, const string& rule, bool is_auth) const;
+  bool match(const struct RGWUserInfo *user, const string& rule, bool is_auth, struct req_state *s) const;
 
 public:
   RGWPolicyPrincipal() : type(0) {}
 
   bool empty() const { return name.empty(); }
-  bool check(const struct RGWUserInfo *user, bool is_auth) const;
+  bool check(const struct RGWUserInfo *user, bool is_auth, struct req_state *s) const;
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -211,5 +211,7 @@ public:
   void decode_json(JSONObj *obj);
 };
 WRITE_CLASS_ENCODER(RGWBucketPolicy)
+
+bool rgw_auth_id_is_bucket_owner(struct req_state * const s, const rgw_user *owner = NULL);
 
 #endif
