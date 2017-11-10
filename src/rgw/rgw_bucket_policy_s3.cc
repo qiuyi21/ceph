@@ -134,6 +134,7 @@ public:
 
   int compare(const char *str) {
     cur = ws.c_str();
+    if (cur[0] == '*' && !cur[1]) return 0;
     readchar();
 
     const char *cp = NULL, *mp = NULL;
@@ -415,26 +416,29 @@ void RGWBucketPolicyCondIP::decode_json(JSONObj *obj) {
     throw JSONDecoder::err("Invalid field " + key);
 }
 
-bool RGWPolicyPrincipal::match(const RGWUserInfo *user, const string& rule, bool is_auth) const {
+bool RGWPolicyPrincipal::match(const RGWUserInfo *user, const string& rule, bool is_auth,
+    struct req_state *s) const {
   if (!is_auth) {    // anonymous user
     int i = rule.size() - 1;
     const char *pc = rule.c_str();
     while (i >= 0) {
-      if (pc[i] != '*') return false;
+      if (pc[i] != '*') {
+        dout(20) << "bucket policy principal anonymous not match \"" << rule << "\"" << dendl;
+        return false;
+      }
       i--;
     }
   }
   WildStr wild(rule);
-  bool ok = !wild.parse(user).compare(user->user_id.id);
-  if (ok) {
-    dout(20) << "bucket policy principal \"" << user->user_id.id << "\" match \"" << rule << "\"" << dendl;
-  }
+  bool ok = !wild.parse(user).compare(s->auth_id);
+  dout(20) << "bucket policy principal \"" << s->auth_id << "\"" << (ok ? "" : " not")
+    << " match \"" << rule << "\"" << dendl;
   return ok;
 }
 
-bool RGWPolicyPrincipal::check(const RGWUserInfo *user, bool is_auth) const {
+bool RGWPolicyPrincipal::check(const RGWUserInfo *user, bool is_auth, struct req_state *s) const {
   for (auto iter = name.begin(); iter != name.end(); ++iter) {
-    if (match(user, *iter, is_auth)) return true;
+    if (match(user, *iter, is_auth, s)) return true;
   }
   return false;
 }
@@ -463,41 +467,69 @@ bool RGWPolicyStatement::match_action(int op_type, struct req_state *s) const {
 
   for (auto iter = action.begin(); iter != action.end(); ++iter) {
     const string& act = *iter;
+    WildStr wild(act);
 
     switch (op_type) {
     case RGW_OP_GET_OBJ:
-      ok = !act.compare("s3:GetObject");
+      ok = !wild.compare("s3:GetObject");
       break;
     case RGW_OP_PUT_OBJ:
     case RGW_OP_POST_OBJ:
     case RGW_OP_INIT_MULTIPART:
     case RGW_OP_COMPLETE_MULTIPART:
-      ok = !act.compare("s3:PutObject");
+      ok = !wild.compare("s3:PutObject");
       break;
     case RGW_OP_DELETE_OBJ:
-      ok = !act.compare("s3:DeleteObject");
+      ok = !wild.compare("s3:DeleteObject");
       break;
     case RGW_OP_LIST_MULTIPART:
-      ok = !act.compare("s3:ListMultipartUploadParts");
+      ok = !wild.compare("s3:ListMultipartUploadParts");
       break;
     case RGW_OP_ABORT_MULTIPART:
-      ok = !act.compare("s3:AbortMultipartUpload");
+      ok = !wild.compare("s3:AbortMultipartUpload");
       break;
     case RGW_OP_LIST_BUCKET:
       if (s->info.args.exists("versions"))
-        ok = !act.compare("s3:ListBucketVersions");
+        ok = !wild.compare("s3:ListBucketVersions");
       else
-        ok = !act.compare("s3:ListBucket");
+        ok = !wild.compare("s3:ListBucket");
       break;
     case RGW_OP_LIST_BUCKET_MULTIPARTS:
-      ok = !act.compare("s3:ListBucketMultipartUploads");
+      ok = !wild.compare("s3:ListBucketMultipartUploads");
+      break;
+    case RGW_OP_DELETE_BUCKET:
+      ok = !wild.compare("s3:DeleteBucket");
+      break;
+    case RGW_OP_GET_ACLS:
+      if (!s->object.empty()) {
+        ok = !wild.compare("s3:GetObjectAcl");
+      } else {
+        ok = !wild.compare("s3:GetBucketAcl");
+      }
+      break;
+    case RGW_OP_PUT_ACLS:
+      if (!s->object.empty()) {
+        ok = !wild.compare("s3:PutObjectAcl");
+      } else {
+        ok = !wild.compare("s3:PutBucketAcl");
+      }
+      break;
+    case RGW_OP_SET_BUCKET_VERSIONING:
+      ok = !wild.compare("s3:PutBucketVersioning");
+      break;
+    case RGW_OP_SET_BUCKET_WEBSITE:
+      ok = !wild.compare("s3:PutBucketWebsite");
+      break;
+    case RGW_OP_PUT_CORS:
+    case RGW_OP_DELETE_CORS:
+      ok = !wild.compare("s3:PutBucketCORS");
       break;
     default:
       break;
     }
 
     if (ok) {
-      dout(20) << "bucket policy action match \"" << act << "\"" << dendl;
+      dout(20) << "bucket policy action " << op_type << " match \"" << act << "\"" << dendl;
       return true;
     }
   }
@@ -530,7 +562,7 @@ inline bool RGWPolicyStatement::match_condition(struct req_state *s) const {
 
 RGWPolicyEffect RGWPolicyStatement::check(const RGWUserInfo *user, bool is_auth, int op_type,
     const string& objname, struct req_state *s) const {
-  if (match_action(op_type, s) && match_resource(user, objname) && principal.check(user, is_auth)
+  if (match_action(op_type, s) && match_resource(user, objname) && principal.check(user, is_auth, s)
       && match_condition(s)) {
     return (RGWPolicyEffect) effect;
   }
@@ -642,19 +674,28 @@ void RGWPolicyStatement::dump(Formatter *f, const string& bucket_name) const {
 
 bool RGWPolicyStatement::is_valid_action(const string& act) {
   static const char *ss[] = {
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:ListMultipartUploadParts",
       "s3:AbortMultipartUpload",
+      "s3:DeleteBucket",
+      "s3:DeleteObject",
+      "s3:GetBucketAcl",
+      "s3:GetObject",
+      "s3:GetObjectAcl",
       "s3:ListBucket",
-      "s3:ListBucketVersions",
       "s3:ListBucketMultipartUploads",
+      "s3:ListBucketVersions",
+      "s3:ListMultipartUploadParts",
+      "s3:PutBucketAcl",
+      "s3:PutBucketCORS",
+      "s3:PutBucketVersioning",
+      "s3:PutBucketWebsite",
+      "s3:PutObject",
+      "s3:PutObjectAcl",
       NULL
   };
   __u8 i = 0;
+  WildStr wild(act);
   do {
-    if (!act.compare(ss[i])) return true;
+    if (!wild.compare(ss[i])) return true;
   } while (ss[++i]);
   dout(15) << "bucket policy action not support \"" << act << "\"" << dendl;
   return false;
@@ -878,4 +919,13 @@ int RGWBucketPolicy::upgrade_from_v1(bufferlist::iterator& bl, RGWRados *store, 
 
   bucket_attrs[RGW_ATTR_POLICY] = polbl;
   return rgw_bucket_set_attrs(store, bucket_info, bucket_attrs, &bucket_info.objv_tracker);
+}
+
+bool rgw_auth_id_is_bucket_owner(struct req_state * const s, const rgw_user *owner) {
+  string uid;
+  if (!owner) {
+    owner = &s->bucket_owner.get_id();
+  }
+  owner->to_str(uid);
+  return (!uid.empty() && uid.compare(s->auth_id) == 0);
 }

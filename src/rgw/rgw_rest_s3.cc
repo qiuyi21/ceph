@@ -3966,6 +3966,7 @@ int RGW_Auth_S3::authorize_v4(RGWRados *store, struct req_state *s)
 
   RGWAccessKey& k = iter->second;
 
+  s->user->user_id.to_str(s->auth_id);
   if (!k.subuser.empty()) {
     map<string, RGWSubUser>::iterator uiter = s->user->subusers.find(k.subuser);
     if (uiter == s->user->subusers.end()) {
@@ -3974,6 +3975,8 @@ int RGW_Auth_S3::authorize_v4(RGWRados *store, struct req_state *s)
     }
     RGWSubUser& subuser = uiter->second;
     s->perm_mask = subuser.perm_mask;
+    s->auth_id.append(":user/");
+    s->auth_id.append(subuser.name);
   } else {
     s->perm_mask = RGW_PERM_FULL_CONTROL;
   }
@@ -4182,6 +4185,7 @@ int RGW_Auth_S3::authorize_v2(RGWRados *store, struct req_state *s)
     }
     RGWAccessKey& k = iter->second;
 
+    s->user->user_id.to_str(s->auth_id);
     if (!k.subuser.empty()) {
       map<string, RGWSubUser>::iterator uiter =
 	s->user->subusers.find(k.subuser);
@@ -4191,6 +4195,8 @@ int RGW_Auth_S3::authorize_v2(RGWRados *store, struct req_state *s)
       }
       RGWSubUser& subuser = uiter->second;
       s->perm_mask = subuser.perm_mask;
+      s->auth_id.append(":user/");
+      s->auth_id.append(subuser.name);
     } else
       s->perm_mask = RGW_PERM_FULL_CONTROL;
 

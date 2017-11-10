@@ -887,12 +887,12 @@ bool verify_bucket_permission(struct req_state * const s,
                               RGWAccessControlPolicy * const bucket_acl,
                               const int perm)
 {
-  if (!s->bucket_policy.empty() && (perm & s->perm_mask & (RGW_PERM_READ | RGW_PERM_WRITE))) {
+  if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_FULL_CONTROL)) {
     switch (s->bucket_policy.verify_permission()) {
     case RGW_POLICY_ALLOW:
       return true;
     case RGW_POLICY_DENY:
-      if (s->user->user_id.compare(s->bucket_owner.get_id()))
+      if (!rgw_auth_id_is_bucket_owner(s))
         return false;
       break;
     default:
@@ -931,7 +931,8 @@ bool verify_object_permission(struct req_state * const s,
                               RGWAccessControlPolicy * const object_acl,
                               const int perm)
 {
-  if (!s->bucket_policy.empty() && (perm & s->perm_mask & RGW_PERM_READ)) {
+  if (!s->bucket_policy.empty()
+      && (perm & s->perm_mask & (RGW_PERM_READ | RGW_PERM_READ_ACP | RGW_PERM_WRITE_ACP))) {
     switch (s->bucket_policy.verify_permission()) {
     case RGW_POLICY_ALLOW:
       if (s->cct->_conf->rgw_bucket_owner_share_any_by_policy || !object_acl
@@ -940,7 +941,7 @@ bool verify_object_permission(struct req_state * const s,
         return true;
       break;
     case RGW_POLICY_DENY:
-      if (s->user->user_id.compare(s->bucket_owner.get_id()))
+      if (!rgw_auth_id_is_bucket_owner(s))
         return false;
       break;
     default:
