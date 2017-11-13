@@ -1904,7 +1904,9 @@ int rgw_dir_suggest_changes(cls_method_context_t hctx, bufferlist *in, bufferlis
     return rc;
   }
 
-  timespan tag_timeout(header.tag_timeout ? header.tag_timeout : CEPH_RGW_TAG_TIMEOUT);
+  timespan tag_timeout(
+    std::chrono::seconds(
+      header.tag_timeout ? header.tag_timeout : CEPH_RGW_TAG_TIMEOUT));
 
   bufferlist::iterator in_iter = in->begin();
 
@@ -3206,10 +3208,10 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, b
     *truncated = false;
 
   string start_key;
-  if (key_iter.empty()) {
+  if (marker.empty()) {
     prepend_index_prefix(marker, GC_OBJ_TIME_INDEX, &start_key);
   } else {
-    start_key = key_iter;
+    start_key = marker;
   }
 
   if (expired_only) {
@@ -3253,7 +3255,8 @@ static int gc_iterate_entries(cls_method_context_t hctx, const string& marker, b
       if (max_entries && (i >= max_entries)) {
         if (truncated)
           *truncated = true;
-        key_iter = key;
+        --iter;
+        key_iter = iter->first;
         return 0;
       }
 
@@ -3278,11 +3281,10 @@ static int gc_list_cb(cls_method_context_t hctx, const string& key, cls_rgw_gc_o
 
 static int gc_list_entries(cls_method_context_t hctx, const string& marker,
 			   uint32_t max, bool expired_only,
-                           list<cls_rgw_gc_obj_info>& entries, bool *truncated)
+                           list<cls_rgw_gc_obj_info>& entries, bool *truncated, string& next_marker)
 {
-  string key_iter;
   int ret = gc_iterate_entries(hctx, marker, expired_only,
-                              key_iter, max, truncated,
+                              next_marker, max, truncated,
                               gc_list_cb, &entries);
   return ret;
 }
@@ -3300,7 +3302,8 @@ static int rgw_cls_gc_list(cls_method_context_t hctx, bufferlist *in, bufferlist
   }
 
   cls_rgw_gc_list_ret op_ret;
-  int ret = gc_list_entries(hctx, op.marker, op.max, op.expired_only, op_ret.entries, &op_ret.truncated);
+  int ret = gc_list_entries(hctx, op.marker, op.max, op.expired_only, 
+   op_ret.entries, &op_ret.truncated, op_ret.next_marker);
   if (ret < 0)
     return ret;
 

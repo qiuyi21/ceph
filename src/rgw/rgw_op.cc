@@ -31,6 +31,7 @@
 #include "rgw_client_io.h"
 #include "rgw_bucket_policy_s3.h"
 #include "rgw_mysql.h"
+#include "cls/lock/cls_lock_client.h"
 
 #include "include/assert.h"
 
@@ -253,6 +254,24 @@ static int get_obj_attrs(RGWRados *store, struct req_state *s, rgw_obj& obj, map
   return read_op.prepare(NULL, NULL);
 }
 
+static int modify_obj_attr(RGWRados *store, struct req_state *s, rgw_obj& obj, const char* attr_name, bufferlist& attr_val)
+{
+  map<string, bufferlist> attrs;
+  RGWRados::Object op_target(store, s->bucket_info, *static_cast<RGWObjectCtx *>(s->obj_ctx), obj);
+  RGWRados::Object::Read read_op(&op_target);
+
+  read_op.params.attrs = &attrs;
+  read_op.params.perr = &s->err;
+  
+  int r = read_op.prepare(NULL, NULL);
+  if (r < 0) {
+    return r;
+  }
+  store->set_atomic(s->obj_ctx, read_op.state.obj);
+  attrs[attr_name] = attr_val;
+  return store->set_attrs(s->obj_ctx, read_op.state.obj, attrs, NULL);
+}
+
 static int get_system_obj_attrs(RGWRados *store, struct req_state *s, rgw_obj& obj, map<string, bufferlist>& attrs,
                          uint64_t *obj_size, RGWObjVersionTracker *objv_tracker)
 {
@@ -396,6 +415,12 @@ int rgw_build_bucket_policies(RGWRados* store, struct req_state* s)
     if (!r) {
       if (!zonegroup.endpoints.empty()) {
 	s->zonegroup_endpoint = zonegroup.endpoints.front();
+      } else {
+        // use zonegroup's master zone endpoints
+        auto z = zonegroup.zones.find(zonegroup.master_zone);
+        if (z != zonegroup.zones.end() && !z->second.endpoints.empty()) {
+          s->zonegroup_endpoint = z->second.endpoints.front();
+        }
       }
       s->zonegroup_name = zonegroup.get_name();
     }
@@ -1240,7 +1265,7 @@ static bool object_is_expired(map<string, bufferlist>& attrs) {
       return false;
     }
 
-    if (delete_at <= ceph_clock_now(g_ceph_context)) {
+    if (delete_at <= ceph_clock_now(g_ceph_context) && !delete_at.is_zero()) {
       return true;
     }
   }
@@ -1835,7 +1860,7 @@ void RGWListBucket::execute()
   list_op.params.list_versions = list_versions;
 
   op_ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
-  if (op_ret >= 0 && !delimiter.empty()) {
+  if (op_ret >= 0) {
     next_marker = list_op.get_next_marker();
   }
 }
@@ -2036,6 +2061,7 @@ void RGWCreateBucket::execute()
 
   RGWBucketInfo master_info;
   rgw_bucket *pmaster_bucket;
+  uint32_t *pmaster_num_shards;
   real_time creation_time;
 
   if (!store->is_meta_master()) {
@@ -2051,9 +2077,11 @@ void RGWCreateBucket::execute()
     ldout(s->cct, 20) << "got creation time: << " << master_info.creation_time << dendl;
     pmaster_bucket= &master_info.bucket;
     creation_time = master_info.creation_time;
+    pmaster_num_shards = &master_info.num_shards;
     pobjv = &objv;
   } else {
     pmaster_bucket = NULL;
+    pmaster_num_shards = NULL;
   }
 
   string zonegroup_id;
@@ -2115,7 +2143,7 @@ void RGWCreateBucket::execute()
   op_ret = store->create_bucket(*(s->user), s->bucket, zonegroup_id,
                                 placement_rule, s->bucket_info.swift_ver_location,
                                 attrs, info, pobjv, &ep_objv, creation_time,
-                                pmaster_bucket, true);
+                                pmaster_bucket, pmaster_num_shards, true);
   /* continue if EEXIST and create_bucket will fail below.  this way we can
    * recover from a partial create by retrying it. */
   ldout(s->cct, 20) << "rgw_create_bucket returned ret=" << op_ret << " bucket=" << s->bucket << dendl;
@@ -2253,6 +2281,11 @@ void RGWDeleteBucket::execute()
      ldout(s->cct, 1) << "WARNING: failed to sync user stats before bucket delete: op_ret= " << op_ret << dendl;
   }
 
+  op_ret = store->check_bucket_empty(s->bucket);
+  if (op_ret < 0) {
+    return;
+  }
+
   if (!store->is_meta_master()) {
     bufferlist in_data;
     op_ret = forward_request_to_master(s, &ot.read_version, store, in_data,
@@ -2267,7 +2300,7 @@ void RGWDeleteBucket::execute()
     }
   }
 
-  op_ret = store->delete_bucket(s->bucket, ot);
+  op_ret = store->delete_bucket(s->bucket, ot, false);
 
   if (op_ret == -ECANCELED) {
     // lost a race, either with mdlog sync or another delete bucket operation.
@@ -2338,7 +2371,7 @@ protected:
   int prepare(RGWRados *store, string *oid_rand);
   int do_complete(string& etag, real_time *mtime, real_time set_mtime,
                   map<string, bufferlist>& attrs, real_time delete_at,
-                  const char *if_match = NULL, const char *if_nomatch = NULL);
+                  const char *if_match = NULL, const char *if_nomatch = NULL, const string *user_data = nullptr);
 
 public:
   bool immutable_head() { return true; }
@@ -2412,11 +2445,12 @@ static bool is_v2_upload_id(const string& upload_id)
 
 int RGWPutObjProcessor_Multipart::do_complete(string& etag, real_time *mtime, real_time set_mtime,
                                               map<string, bufferlist>& attrs, real_time delete_at,
-                                              const char *if_match, const char *if_nomatch)
+                                              const char *if_match, const char *if_nomatch, const string *user_data)
 {
   complete_writing_data();
 
   RGWRados::Object op_target(store, s->bucket_info, obj_ctx, head_obj);
+  op_target.set_versioning_disabled(true);
   RGWRados::Object::Write head_obj_op(&op_target);
 
   head_obj_op.meta.set_mtime = set_mtime;
@@ -2832,8 +2866,9 @@ void RGWPutObj::execute()
     emplace_attr(RGW_ATTR_SLO_UINDICATOR, std::move(slo_userindicator_bl));
   }
 
-  op_ret = processor->complete(etag, &mtime, real_time(), attrs, delete_at,
-			      if_match, if_nomatch);
+  op_ret = processor->complete(etag, &mtime, real_time(), attrs,
+                               (delete_at ? *delete_at : real_time()), if_match, if_nomatch,
+                               (user_data.empty() ? nullptr : &user_data));
 
 done:
   dispose_processor(processor);
@@ -2954,7 +2989,8 @@ void RGWPostObj::execute()
     emplace_attr(RGW_ATTR_CONTENT_TYPE, std::move(ct_bl));
   }
 
-  op_ret = processor->complete(etag, NULL, real_time(), attrs, delete_at);
+  op_ret = processor->complete(etag, NULL, real_time(), attrs,
+                              (delete_at ? *delete_at : real_time()));
 
 done:
   dispose_processor(processor);
@@ -3645,7 +3681,7 @@ void RGWCopyObj::execute()
                            copy_if_newer,
 			   attrs, RGW_OBJ_CATEGORY_MAIN,
 			   olh_epoch,
-			   delete_at,
+			   (delete_at ? *delete_at : real_time()),
 			   (version_id.empty() ? NULL : &version_id),
 			   &s->req_id, /* use req_id as tag */
 			   &etag,
@@ -3756,6 +3792,20 @@ void RGWPutACLs::execute()
     return;
   }
 
+  // forward bucket acl requests to meta master zone
+  if (s->object.empty() && !store->is_meta_master()) {
+    bufferlist in_data;
+    // include acl data unless it was generated from a canned_acl
+    if (s->canned_acl.empty()) {
+      in_data.append(data, len);
+    }
+    op_ret = forward_request_to_master(s, NULL, store, in_data, NULL);
+    if (op_ret < 0) {
+      ldout(s->cct, 20) << __func__ << "forward_request_to_master returned ret=" << op_ret << dendl;
+      return;
+    }
+  }
+
   if (s->cct->_conf->subsys.should_gather(ceph_subsys_rgw, 15)) {
     ldout(s->cct, 15) << "Old AccessControlPolicy";
     policy->to_xml(*_dout);
@@ -3777,16 +3827,12 @@ void RGWPutACLs::execute()
   obj.set_instance(s->object.instance);
   map<string, bufferlist> attrs;
 
-  store->set_atomic(s->obj_ctx, obj);
-
   if (!s->object.empty()) {
-    op_ret = get_obj_attrs(store, s, obj, attrs);
-    if (op_ret < 0)
-      return;
-  
-    attrs[RGW_ATTR_ACL] = bl;
-    op_ret = store->set_attrs(s->obj_ctx, obj, attrs, NULL);
+    //if instance is empty, we should modify the latest object
+    op_ret = modify_obj_attr(store, s, obj, RGW_ATTR_ACL, bl);
   } else {
+    store->set_atomic(s->obj_ctx, obj);
+    
     attrs = s->bucket_attrs;
     attrs[RGW_ATTR_ACL] = bl;
     op_ret = rgw_bucket_set_attrs(store, s->bucket_info, attrs, &s->bucket_info.objv_tracker);
@@ -3832,6 +3878,14 @@ void RGWPutCORS::execute()
   op_ret = get_params();
   if (op_ret < 0)
     return;
+
+  if (!store->is_meta_master()) {
+    op_ret = forward_request_to_master(s, NULL, store, in_data, nullptr);
+    if (op_ret < 0) {
+      ldout(s->cct, 20) << __func__ << "forward_request_to_master returned ret=" << op_ret << dendl;
+      return;
+    }
+  }
 
   bool is_object_op = (!s->object.empty());
   if (is_object_op) {
@@ -4293,6 +4347,38 @@ void RGWCompleteMultipart::execute()
   meta_obj.set_in_extra_data(true);
   meta_obj.index_hash_source = s->object.name;
 
+  auto raw_oid = meta_obj.bucket.bucket_id + "_" + meta_obj.get_object();
+
+  /*take a cls lock on meta_obj to prevent racing completions (or retries)
+    from deleting the parts*/
+  librados::IoCtx ioctx;
+
+  op_ret = store->get_obj_ioctx(meta_obj, &ioctx);
+  if (op_ret < 0) {
+    ldout(s->cct, 0) << "ERROR: failed to open extra_dat_ctx, obj="
+		     << raw_oid
+		     << " ret=" << op_ret << dendl;
+    return;
+  }
+
+  librados::ObjectWriteOperation op;
+  rados::cls::lock::Lock l("RGWCompleteMultipart");
+  int max_lock_secs_mp = s->cct->_conf->rgw_mp_lock_max_time;
+  utime_t time(max_lock_secs_mp, 0);
+
+  op.assert_exists();
+  l.set_duration(time);
+  l.lock_exclusive(&op);
+
+  op_ret = ioctx.operate(raw_oid, &op);
+  if (op_ret < 0) {
+    dout(0) << "RGWCompleteMultipart::execute() failed to acquire lock "
+	    << dendl;
+    op_ret = -ERR_INTERNAL_ERROR;
+    s->err.message = "This multipart completion is already in progress";
+    return;
+  }
+
   op_ret = get_obj_attrs(store, s, meta_obj, attrs);
   if (op_ret < 0) {
     ldout(s->cct, 0) << "ERROR: failed to get obj attrs, obj=" << meta_obj
@@ -4407,6 +4493,10 @@ void RGWCompleteMultipart::execute()
 			    s->bucket_info, meta_obj, 0);
   if (r < 0) {
     ldout(store->ctx(), 0) << "WARNING: failed to remove object " << meta_obj << dendl;
+    r = l.unlock(&ioctx, meta_oid);
+    if (r < 0) {
+      ldout(store->ctx(), 0) << "WARNING: failed to unlock " << meta_oid << dendl;
+    }
   }
 }
 
