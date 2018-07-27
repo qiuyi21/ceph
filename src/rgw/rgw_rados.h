@@ -3165,7 +3165,8 @@ public:
                string *ptag,
                ceph::buffer::list *petag,
                void (*progress_cb)(off_t, void *),
-               void *progress_data);
+               void *progress_data,
+               uint64_t *objectSize = nullptr);
 
   int copy_obj_data(RGWObjectCtx& obj_ctx,
                RGWBucketInfo& dest_bucket_info,
@@ -3888,6 +3889,7 @@ public:
   CephContext *ctx();
 
   bool is_canceled() { return canceled; }
+  virtual string obj_key_instance() { return ""; }
 }; /* RGWPutObjProcessor */
 
 struct put_obj_aio_info {
@@ -3929,6 +3931,7 @@ public:
 
   RGWPutObjProcessor_Aio(RGWObjectCtx& obj_ctx, RGWBucketInfo& bucket_info) : RGWPutObjProcessor(obj_ctx, bucket_info) {}
   ~RGWPutObjProcessor_Aio() override;
+  string obj_key_instance() override { return head_obj.key.instance; }
 }; /* RGWPutObjProcessor_Aio */
 
 class RGWPutObjProcessor_Atomic : public RGWPutObjProcessor_Aio

@@ -125,6 +125,7 @@ set(rgw_a_srcs
   rgw_torrent.cc
   rgw_crypt.cc
   rgw_crypt_sanitize.cc
+  rgw_notification.cc
   rgw_iam_policy.cc)
 
 gperf_generate(${CMAKE_SOURCE_DIR}/src/rgw/rgw_iam_policy_keywords.gperf
@@ -151,6 +152,7 @@ target_compile_definitions(rgw_a PUBLIC BOOST_COROUTINES_NO_DEPRECATION_WARNING)
 target_link_libraries(rgw_a librados cls_lock_client cls_rgw_client cls_refcount_client
   cls_log_client cls_statelog_client cls_timeindex_client cls_version_client
   cls_replica_log_client cls_user_client ceph-common common_utf8 global
+  aws-cpp-sdk-lambda aws-cpp-sdk-core crypto
   ${CURL_LIBRARIES}
   ${EXPAT_LIBRARIES}
   ${OPENLDAP_LIBRARIES} ${CRYPTO_LIBS})

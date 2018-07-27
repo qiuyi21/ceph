@@ -38,6 +38,7 @@
 #include "rgw_acl.h"
 #include "rgw_cors.h"
 #include "rgw_quota.h"
+#include "rgw_notification.h"
 
 #include "rgw_lc.h"
 #include "rgw_torrent.h"
@@ -966,6 +967,8 @@ class RGWPutObj : public RGWOp {
 
   friend class RGWPutObjProcessor;
 
+  void send_notification(const std::string& verId);
+
 protected:
   seed torrent;
   off_t ofs;
@@ -1091,6 +1094,7 @@ protected:
   virtual bool is_next_file_to_upload() {
      return false;
   }
+  void send_notification(const std::string& verId);
 public:
   RGWPostObj() : min_len(0),
                  max_len(LLONG_MAX),
@@ -1236,6 +1240,8 @@ protected:
   bool no_precondition_error;
   std::unique_ptr<RGWBulkDelete::Deleter> deleter;
 
+  void send_notification(const map<string, bufferlist>& obj_attrs);
+
 public:
   RGWDeleteObj()
     : delete_marker(false),
@@ -1297,6 +1303,7 @@ protected:
   bool copy_if_newer;
 
   int init_common();
+  void send_notification(const std::string& verId);
 
 public:
   RGWCopyObj() {
@@ -1620,6 +1627,8 @@ protected:
     }
   } serializer;
 
+  void send_notification(const std::string& version_id);
+
 public:
   RGWCompleteMultipart() {
     data = NULL;
@@ -1788,6 +1797,8 @@ protected:
   bool quiet;
   bool status_dumped;
   bool acl_allowed = false;
+
+  void send_notification(const std::string& objKey, const std::string& verId);
 
 public:
   RGWDeleteMultiObj() {
@@ -2147,6 +2158,42 @@ public:
   }
 };
 
+class RGWPutBucketNotification: public RGWOp {
+protected:
+  bufferlist in_data;
+  RGWBucketNotificationConf notify_conf;
+
+public:
+  RGWPutBucketNotification() {}
+
+  int verify_permission() override;
+  void pre_exec() override;
+  void execute() override;
+
+  int get_params();
+
+  void send_response() override;
+  const std::string name() override { return "put_bucket_notification"; }
+  RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_NOTIFICATION; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWGetBucketNotification: public RGWOp {
+protected:
+  RGWBucketNotificationConf notify_conf;
+
+public:
+  RGWGetBucketNotification() {}
+
+  int verify_permission() override;
+  void pre_exec() override;
+  void execute() override;
+
+  void send_response() override;
+  const string name() override { return "get_bucket_notification"; }
+  RGWOpType get_type() override { return RGW_OP_GET_BUCKET_NOTIFICATION; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+};
 
 class RGWConfigBucketMetaSearch : public RGWOp {
 protected:

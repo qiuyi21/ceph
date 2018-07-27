@@ -5315,6 +5315,31 @@ std::vector<Option> get_rgw_options() {
         "A comma delimited list of HTTP headers to log when seen, ignores case (e.g., "
         "http_x_forwarded_for)."),
 
+    Option("rgw_lambda_server_url", Option::TYPE_STR, Option::LEVEL_BASIC)
+    .set_default("")
+    .set_description("Lambda server endpoint")
+    .set_long_description("Lambda server endpoint"),
+
+    Option("rgw_lambda_access_key", Option::TYPE_STR, Option::LEVEL_BASIC)
+    .set_default("")
+    .set_description("Lambda service access key ID")
+    .set_long_description("Lambda service access key ID"),
+
+    Option("rgw_lambda_secret_key", Option::TYPE_STR, Option::LEVEL_BASIC)
+    .set_default("")
+    .set_description("Lambda service secret key")
+    .set_long_description("Lambda service secret key"),
+
+    Option("rgw_aws_sdk_log_level", Option::TYPE_INT, Option::LEVEL_BASIC)
+    .set_default(3)
+    .set_description("AWS SDK log level")
+    .set_long_description("AWS SDK log level"),
+
+    Option("rgw_notification_event_threads", Option::TYPE_INT, Option::LEVEL_BASIC)
+    .set_default(16)
+    .set_description("Number of concurrent notification event operations")
+    .set_long_description("Number of concurrent notification event operations"),
+
     Option("rgw_num_async_rados_threads", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(32)
     .set_description("Number of concurrent RADOS operations in multisite sync")

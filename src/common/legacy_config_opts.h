@@ -1506,6 +1506,12 @@ OPTION(rgw_objexp_chunk_size, OPT_U32) // maximum number of entries in a single 
 OPTION(rgw_enable_static_website, OPT_BOOL) // enable static website feature
 OPTION(rgw_log_http_headers, OPT_STR) // list of HTTP headers to log when seen, ignores case (e.g., http_x_forwarded_for
 
+OPTION(rgw_lambda_server_url, OPT_STR)
+OPTION(rgw_lambda_access_key, OPT_STR)
+OPTION(rgw_lambda_secret_key, OPT_STR)
+OPTION(rgw_aws_sdk_log_level, OPT_INT)
+OPTION(rgw_notification_event_threads, OPT_INT)
+
 OPTION(rgw_num_async_rados_threads, OPT_INT) // num of threads to use for async rados operations
 OPTION(rgw_md_notify_interval_msec, OPT_INT) // metadata changes notification interval to followers
 OPTION(rgw_run_sync_thread, OPT_BOOL) // whether radosgw (not radosgw-admin) spawns the sync thread

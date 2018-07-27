@@ -2976,6 +2976,9 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_get()
     return new RGWGetBucketWebsite_ObjStore_S3;
   }
 
+  if (s->info.args.exists("notification"))
+    return new RGWGetBucketNotification;
+
   if (s->info.args.exists("mdsearch")) {
     return new RGWGetBucketMetaSearch_ObjStore_S3;
   }
@@ -3018,6 +3021,8 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_put()
     }
     return new RGWSetBucketWebsite_ObjStore_S3;
   }
+  if (s->info.args.exists("notification"))
+    return new RGWPutBucketNotification;
   if (is_acl_op()) {
     return new RGWPutACLs_ObjStore_S3;
   } else if (is_cors_op()) {
@@ -3828,6 +3833,7 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
         case RGW_OP_PUT_BUCKET_POLICY:
         case RGW_OP_PUT_OBJ_TAGGING:
         case RGW_OP_PUT_LC:
+        case RGW_OP_PUT_BUCKET_NOTIFICATION:
           break;
         default:
           dout(10) << "ERROR: AWS4 completion for this operation NOT IMPLEMENTED" << dendl;
@@ -4032,6 +4038,10 @@ AWSEngine::authenticate(const req_state* const s) const
   if (auth_data.access_key_id.empty() || auth_data.client_signature.empty()) {
     return result_t::deny(-EINVAL);
   } else {
+    /* dongshz: need to save current access key, I have no choice. */
+    const std::string *str = &s->auth.access_key;
+    *((std::string *) str) = auth_data.access_key_id.to_string();
+
     return authenticate(auth_data.access_key_id,
 		        auth_data.client_signature,
 			auth_data.string_to_sign,

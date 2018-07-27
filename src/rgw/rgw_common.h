@@ -108,6 +108,7 @@ using ceph::crypto::MD5;
 /* IAM Policy */
 #define RGW_ATTR_IAM_POLICY	RGW_ATTR_PREFIX "iam-policy"
 
+#define RGW_ATTR_NOTIFICATION   RGW_ATTR_PREFIX "notification"
 
 /* RGW File Attributes */
 #define RGW_ATTR_UNIX_KEY1      RGW_ATTR_PREFIX "unix-key1"
@@ -444,6 +445,8 @@ enum RGWOpType {
   RGW_OP_SET_BUCKET_VERSIONING,
   RGW_OP_GET_BUCKET_WEBSITE,
   RGW_OP_SET_BUCKET_WEBSITE,
+  RGW_OP_GET_BUCKET_NOTIFICATION,
+  RGW_OP_PUT_BUCKET_NOTIFICATION,
   RGW_OP_STAT_BUCKET,
   RGW_OP_CREATE_BUCKET,
   RGW_OP_DELETE_BUCKET,
@@ -1829,6 +1832,8 @@ struct req_state {
       std::string x_amz_date;
       ceph::bufferlist encoded_policy;
     } s3_postobj_creds;
+
+    std::string access_key;
   } auth;
 
   std::unique_ptr<RGWAccessControlPolicy> user_acl;

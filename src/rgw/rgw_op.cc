@@ -3662,9 +3662,36 @@ void RGWPutObj::execute()
   }
 
 done:
+  if (!op_ret && !multipart) {
+    send_notification(processor->obj_key_instance());
+  }
   dispose_processor(processor);
   perfcounter->tinc(l_rgw_put_lat,
 		    (ceph_clock_now() - s->time));
+}
+
+void RGWPutObj::send_notification(const std::string& verId) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(s->object.name, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = s->object.name;
+    e->objectSize = s->obj_size;
+    e->objectETag = etag;
+    e->objectVersionId = verId;
+    e->functionArn = targetArn;
+    push_notification_event(e);
+  }
 }
 
 int RGWPostObj::verify_permission()
@@ -3885,9 +3912,35 @@ void RGWPostObj::execute()
 
     op_ret = processor.complete(s->obj_size, etag, nullptr, real_time(),
                                 attrs, (delete_at ? *delete_at : real_time()));
+    if (!op_ret) {
+      send_notification(processor.obj_key_instance());
+    }
   } while (is_next_file_to_upload());
 }
 
+void RGWPostObj::send_notification(const std::string& verId) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(s->object.name, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = s->object.name;
+    e->objectSize = s->obj_size;
+    e->objectETag = etag;
+    e->objectVersionId = verId;
+    e->functionArn = targetArn;
+    push_notification_event(e);
+  }
+}
 
 void RGWPutMetadataAccount::filter_out_temp_url(map<string, bufferlist>& add_attrs,
                                                 const set<string>& rmattr_names,
@@ -4326,6 +4379,9 @@ void RGWDeleteObj::execute()
         op_ret = -ENOENT;
         return;
       }
+      if (!op_ret) {
+        send_notification(attrs);
+      }
     }
 
     if (op_ret == -ECANCELED) {
@@ -4336,6 +4392,33 @@ void RGWDeleteObj::execute()
     }
   } else {
     op_ret = -EINVAL;
+  }
+}
+
+void RGWDeleteObj::send_notification(const map<string, bufferlist>& obj_attrs) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(s->object.name, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = s->object.name;
+    e->objectSize = s->obj_size;
+    auto ai = obj_attrs.find(RGW_ATTR_ETAG);
+    if (ai != obj_attrs.end()) {
+      e->objectETag = ai->second.to_str();
+    }
+    e->objectVersionId = version_id;
+    e->functionArn = targetArn;
+    push_notification_event(e);
   }
 }
 
@@ -4602,8 +4685,36 @@ void RGWCopyObj::execute()
 			   (version_id.empty() ? NULL : &version_id),
 			   &s->req_id, /* use req_id as tag */
 			   &etag,
-			   copy_obj_progress_cb, (void *)this
+			   copy_obj_progress_cb, (void *)this,
+			   &s->obj_size
     );
+  if (!op_ret) {
+    send_notification(dst_obj.key.instance);
+  }
+}
+
+void RGWCopyObj::send_notification(const std::string& verId) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(s->object.name, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = s->object.name;
+    e->objectSize = s->obj_size;
+    e->objectETag = etag.to_str();
+    e->objectVersionId = verId;
+    e->functionArn = targetArn;
+    push_notification_event(e);
+  }
 }
 
 int RGWGetACLs::verify_permission()
@@ -5616,6 +5727,35 @@ void RGWCompleteMultipart::execute()
       ldout(store->ctx(), 0) << "WARNING: failed to remove object "
 			     << meta_obj << dendl;
   }
+
+  if (!op_ret) {
+    s->obj_size = ofs;
+    send_notification(target_obj.key.instance);
+  }
+}
+
+void RGWCompleteMultipart::send_notification(const std::string& version_id) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(s->object.name, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = s->object.name;
+    e->objectSize = s->obj_size;
+    e->objectETag = etag;
+    e->objectVersionId = version_id;
+    e->functionArn = targetArn;
+    push_notification_event(e);
+  }
 }
 
 int RGWCompleteMultipart::MPSerializer::try_lock(
@@ -5883,6 +6023,8 @@ void RGWDeleteMultiObj::execute()
     op_ret = del_op.delete_obj();
     if (op_ret == -ENOENT) {
       op_ret = 0;
+    } else if (!op_ret) {
+      send_notification(iter->name, del_op.result.version_id);
     }
 
     send_partial_response(*iter, del_op.result.delete_marker,
@@ -5904,6 +6046,29 @@ error:
   free(data);
   return;
 
+}
+
+void RGWDeleteMultiObj::send_notification(const std::string& objKey, const std::string& verId) {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    return;
+  }
+  RGWBucketNotificationConf nconf;
+  ::decode(nconf, aiter->second);
+
+  std::string evtName, targetArn, cfgId;
+  if (nconf.match_event(objKey, get_type(), evtName, targetArn, cfgId)) {
+    NotificationEvent *e = new NotificationEvent;
+    e->eventName = evtName;
+    e->configurationId = cfgId;
+    e->bucketName = s->bucket.name;
+    e->objectKey = objKey;
+    e->objectSize = 0;
+    e->objectVersionId = verId;
+    e->functionArn = targetArn;
+    push_notification_event(e);
+  }
 }
 
 bool RGWBulkDelete::Deleter::verify_permission(RGWBucketInfo& binfo,
@@ -7002,4 +7167,143 @@ void RGWDeleteBucketPolicy::execute()
 				    &s->bucket_info.objv_tracker);
       return op_ret;
     });
+}
+
+void RGWPutBucketNotification::send_response() {
+  if (op_ret < 0) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s);
+}
+
+int RGWPutBucketNotification::get_params() {
+  char *data = nullptr;
+  int len = 0;
+  const auto max_size = s->cct->_conf->rgw_max_put_param_size;
+  int r = rgw_rest_read_all_input(s, &data, &len, max_size, false);
+
+  if (r < 0) {
+    return r;
+  }
+
+  auto data_deleter = std::unique_ptr<char, decltype(free)*>{data, free};
+
+  r = do_aws4_auth_completion();
+  if (r < 0) {
+    return r;
+  }
+
+  bufferptr in_ptr(data, len);
+  in_data.append(in_ptr);
+
+  RGWXMLDecoder::XMLParser parser;
+  if (!parser.init()) {
+    ldout(s->cct, 0) << "ERROR: failed to initialize parser" << dendl;
+    return -EIO;
+  }
+
+  if (!parser.parse(data, len, 1)) {
+    string str(data, len);
+    ldout(s->cct, 5) << "failed to parse xml: " << str << dendl;
+    return -EINVAL;
+  }
+
+  try {
+    RGWXMLDecoder::decode_xml("NotificationConfiguration", notify_conf, &parser, true);
+  } catch (RGWXMLDecoder::err& err) {
+    string str(data, len);
+    ldout(s->cct, 5) << "unexpected (" << err.message << ") xml: " << str << dendl;
+    return -EINVAL;
+  }
+
+  RGWAccessKey acckey;
+  for (auto ti = notify_conf.targets.begin(); ti != notify_conf.targets.end(); ti++) {
+    if (ti->target_arn.empty()) {
+      continue;
+    }
+    if (acckey.id.empty()) {
+      auto ai = s->user->access_keys.find(s->auth.access_key);
+      if (ai == s->user->access_keys.end() || ai->second.id.empty()) {
+        ldout(s->cct, 10) << "lambda: auth.access_key '" << s->auth.access_key << "' not found" << dendl;
+        return -EINVAL;
+      }
+      acckey = ai->second;
+    }
+    if (!verify_lambda_function(ti->target_arn, acckey)) {
+      ldout(s->cct, 10) << "lambda: " << ti->target_arn << " is invalid or no permission" << dendl;
+      return -EINVAL;
+    }
+  }
+
+  return 0;
+}
+
+int RGWPutBucketNotification::verify_permission() {
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3PutBucketNotification);
+}
+
+void RGWPutBucketNotification::pre_exec() {
+  rgw_bucket_object_pre_exec(s);
+}
+
+void RGWPutBucketNotification::execute() {
+  op_ret = get_params();
+  if (op_ret < 0) {
+    return;
+  }
+
+  if (!store->is_meta_master()) {
+    op_ret = forward_request_to_master(s, NULL, store, in_data, nullptr);
+    if (op_ret < 0) {
+      ldout(s->cct, 20) << __func__ << " forward_request_to_master returned ret=" << op_ret << dendl;
+      return;
+    }
+  }
+
+  bufferlist bl;
+  ::encode(notify_conf, bl);
+
+  op_ret = retry_raced_bucket_write(store, s, [&bl, this] {
+    auto attrs = s->bucket_attrs;
+    attrs[RGW_ATTR_NOTIFICATION] = bl;
+    return rgw_bucket_set_attrs(store, s->bucket_info, attrs, &s->bucket_info.objv_tracker);
+  });
+}
+
+int RGWGetBucketNotification::verify_permission() {
+  return verify_bucket_owner_or_policy(s, rgw::IAM::s3GetBucketNotification);
+}
+
+void RGWGetBucketNotification::pre_exec() {
+  rgw_bucket_object_pre_exec(s);
+}
+
+void RGWGetBucketNotification::execute() {
+  auto attrs = s->bucket_attrs;
+  auto aiter = attrs.find(RGW_ATTR_NOTIFICATION);
+  if (aiter == attrs.end()) {
+    ldout(s->cct, 20) << __func__ << " can't find bucket NOTIFICATION attr"
+                     << " bucket_name = " << s->bucket_name << dendl;
+  } else {
+    ::decode(notify_conf, aiter->second);
+  }
+}
+
+void RGWGetBucketNotification::send_response() {
+  if (op_ret) {
+    set_req_state_err(s, op_ret);
+  }
+  dump_errno(s);
+  end_header(s, this, "application/xml");
+  dump_start(s);
+
+  if (op_ret < 0) {
+    return;
+  }
+
+  s->formatter->open_object_section_in_ns("NotificationConfiguration", XMLNS_AWS_S3);
+  notify_conf.dump_xml(s->formatter);
+  s->formatter->close_section();
+  rgw_flush_formatter_and_reset(s, s->formatter);
 }

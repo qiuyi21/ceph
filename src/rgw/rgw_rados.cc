@@ -8055,7 +8055,8 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
                string *ptag,
                ceph::buffer::list *petag,
                void (*progress_cb)(off_t, void *),
-               void *progress_data)
+               void *progress_data,
+               uint64_t *objectSize)
 {
   int ret;
   uint64_t obj_size;
@@ -8102,6 +8103,9 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
   ret = read_op.prepare();
   if (ret < 0) {
     return ret;
+  }
+  if (objectSize) {
+    *objectSize = obj_size;
   }
   if (src_attrs.count(RGW_ATTR_CRYPT_MODE)) {
     // Current implementation does not follow S3 spec and even
