@@ -285,6 +285,7 @@ bool verify_lambda_function(const std::string& functionArn, const RGWAccessKey& 
   return true;
 }
 
+// https://docs.aws.amazon.com/lambda/latest/dg/with-s3-example-upload-deployment-pkg.html
 inline static std::shared_ptr<Aws::IOStream> create_invoke_payload(const std::vector<NotificationEvent *> *events) {
   std::shared_ptr<Aws::IOStream> payload = Aws::MakeShared<Aws::StringStream>(ALLOCATIONTAG);
   Aws::Utils::Array<Aws::Utils::Json::JsonValue> arr(events->size());
@@ -305,9 +306,16 @@ inline static std::shared_ptr<Aws::IOStream> create_invoke_payload(const std::ve
       record.WithString("eventTime", buf);
     }
     record.WithString("eventName", evt->eventName);
+    if (!evt->userId.empty()) {
+      record.WithObject("userIdentity", Aws::Utils::Json::JsonValue().WithString("principalId", evt->userId));
+    }
 
     Aws::Utils::Json::JsonValue s3, bucket, obj;
     bucket.WithString("name", evt->bucketName);
+    if (!evt->ownerId.empty()) {
+      bucket.WithObject("ownerIdentity", Aws::Utils::Json::JsonValue().WithString("principalId", evt->ownerId));
+    }
+
     obj.WithString("key", evt->objectKey);
     obj.WithInt64("size", evt->objectSize);
     obj.WithString("eTag", evt->objectETag);

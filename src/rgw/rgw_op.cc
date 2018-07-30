@@ -3690,6 +3690,10 @@ void RGWPutObj::send_notification(const std::string& verId) {
     e->objectETag = etag;
     e->objectVersionId = verId;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }
@@ -3938,6 +3942,10 @@ void RGWPostObj::send_notification(const std::string& verId) {
     e->objectETag = etag;
     e->objectVersionId = verId;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }
@@ -4418,6 +4426,10 @@ void RGWDeleteObj::send_notification(const map<string, bufferlist>& obj_attrs) {
     }
     e->objectVersionId = version_id;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }
@@ -4713,6 +4725,10 @@ void RGWCopyObj::send_notification(const std::string& verId) {
     e->objectETag = etag.to_str();
     e->objectVersionId = verId;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }
@@ -5754,6 +5770,10 @@ void RGWCompleteMultipart::send_notification(const std::string& version_id) {
     e->objectETag = etag;
     e->objectVersionId = version_id;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }
@@ -6067,6 +6087,10 @@ void RGWDeleteMultiObj::send_notification(const std::string& objKey, const std::
     e->objectSize = 0;
     e->objectVersionId = verId;
     e->functionArn = targetArn;
+    if (s->user) {
+      s->user->user_id.to_str(e->userId);
+    }
+    s->bucket_owner.get_id().to_str(e->ownerId);
     push_notification_event(e);
   }
 }

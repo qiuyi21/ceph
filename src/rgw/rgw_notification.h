@@ -136,6 +136,8 @@ struct NotificationEvent {
   std::string objectETag;
   std::string objectVersionId;
   std::string functionArn;
+  std::string userId;
+  std::string ownerId;
 };
 
 bool verify_lambda_function(const std::string& functionArn, const RGWAccessKey& acckey);
