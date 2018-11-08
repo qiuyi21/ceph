@@ -121,7 +121,11 @@ void RGWBucketNotificationConf::decode_xml(XMLObj *obj) {
 
 void RGWBucketNotificationConf::dump_xml(Formatter *f) const {
   if (!targets.empty()) {
-    encode_xml("CloudFunctionConfiguration", targets, f);
+    for (auto iter = targets.begin(); iter != targets.end(); iter++) {
+      f->open_object_section("CloudFunctionConfiguration");
+      iter->dump_xml(f);
+      f->close_section();
+    }
   }
 }
 
