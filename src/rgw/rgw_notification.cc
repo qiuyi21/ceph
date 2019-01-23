@@ -19,8 +19,8 @@
 static Queue<NotificationEvent *> m_qevent;
 static boost::thread *thd_consumer = nullptr;
 static std::mutex thd_mutex;
-static Aws::SDKOptions m_sdkopt;
-static Aws::Lambda::LambdaClient *m_lambda = nullptr;
+static Aws::SDKOptions *m_sdkopt = nullptr;
+static std::shared_ptr<Aws::Lambda::LambdaClient> m_lambda;
 
 template<class T>
 static void encode_xml(const char *name, const std::vector<T>& val, Formatter *f) {
@@ -210,12 +210,8 @@ bool RGWBucketNotificationConf::match_event(const std::string& objKey, RGWOpType
   return false;
 }
 
-static Aws::Lambda::LambdaClient *get_lambda_client(const RGWAccessKey *acckey) {
-  if (m_lambda) {
-    return m_lambda;
-  }
-  std::unique_lock<std::mutex> mlock(thd_mutex);
-  if (m_lambda) {
+static std::shared_ptr<Aws::Lambda::LambdaClient> get_lambda_client(const RGWAccessKey *acckey) {
+  if (!acckey && m_lambda.get()) {
     return m_lambda;
   }
 
@@ -254,19 +250,33 @@ static Aws::Lambda::LambdaClient *get_lambda_client(const RGWAccessKey *acckey) 
     cred.SetAWSSecretKey(g_conf->rgw_lambda_secret_key);
   }
 
-  m_sdkopt.loggingOptions.logLevel = (Aws::Utils::Logging::LogLevel) g_conf->rgw_aws_sdk_log_level;
-  m_sdkopt.loggingOptions.logger_create_fn = []() {
-    return Aws::MakeShared<AwssdkLogger>(ALLOCATIONTAG, m_sdkopt.loggingOptions.logLevel);
-  };
-  Aws::InitAPI(m_sdkopt);
+  if (!m_sdkopt) {
+    std::unique_lock<std::mutex> mlock(thd_mutex);
+    if (!m_sdkopt) {
+      m_sdkopt = new Aws::SDKOptions;
+      m_sdkopt->loggingOptions.logLevel = (Aws::Utils::Logging::LogLevel) g_conf->rgw_aws_sdk_log_level;
+      m_sdkopt->loggingOptions.logger_create_fn = []() {
+        return Aws::MakeShared<AwssdkLogger>(ALLOCATIONTAG, m_sdkopt->loggingOptions.logLevel);
+      };
+      Aws::InitAPI(*m_sdkopt);
+    }
+  }
 
-  m_lambda = new Aws::Lambda::LambdaClient(cred, cfg);
+  if (acckey) {
+    return std::make_shared<Aws::Lambda::LambdaClient>(cred, cfg);
+  }
+  if (!m_lambda.get()) {
+    std::unique_lock<std::mutex> mlock(thd_mutex);
+    if (!m_lambda.get()) {
+      m_lambda = std::make_shared<Aws::Lambda::LambdaClient>(cred, cfg);
+    }
+  }
   return m_lambda;
 }
 
 bool verify_lambda_function(const std::string& functionArn, const RGWAccessKey& acckey) {
   auto client = get_lambda_client(&acckey);
-  if (!client) {
+  if (!client.get()) {
     return false;
   }
 
@@ -348,7 +358,7 @@ inline static std::shared_ptr<Aws::IOStream> create_invoke_payload(const std::ve
 
 static void exec_lambda(std::shared_ptr<std::vector<NotificationEvent *>> events) {
   auto client = get_lambda_client(nullptr);
-  if (!client) {
+  if (!client.get()) {
     return;
   }
 
