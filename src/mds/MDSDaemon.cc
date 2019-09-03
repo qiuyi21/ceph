@@ -586,17 +586,18 @@ void MDSDaemon::send_command_reply(MCommand *m, MDSRank *mds_rank,
   // If someone is using a closed session for sending commands (e.g.
   // the ceph CLI) then we should feel free to clean up this connection
   // as soon as we've sent them a response.
-  const bool live_session = mds_rank &&
-    mds_rank->sessionmap.get_session(session->info.inst.name) != nullptr
-    && session->get_state_seq() > 0;
+  const bool live_session =
+    session->get_state_seq() > 0 &&
+    mds_rank &&
+    mds_rank->sessionmap.get_session(session->info.inst.name);
 
   if (!live_session) {
     // This session only existed to issue commands, so terminate it
     // as soon as we can.
     assert(session->is_closed());
     session->connection->mark_disposable();
-    session->put();
   }
+  session->put();
 
   MCommandReply *reply = new MCommandReply(r, outs);
   reply->set_tid(m->get_tid());
@@ -634,6 +635,7 @@ void MDSDaemon::handle_command(MCommand *m)
   } else {
     r = _handle_command(cmdmap, m, &outbl, &outs, &run_after, &need_reply);
   }
+  session->put();
 
   if (need_reply) {
     send_command_reply(m, mds_rank, r, outbl, outs);
@@ -1293,7 +1295,8 @@ void MDSDaemon::ms_handle_remote_reset(Connection *con)
 
 bool MDSDaemon::ms_verify_authorizer(Connection *con, int peer_type,
 			       int protocol, bufferlist& authorizer_data, bufferlist& authorizer_reply,
-			       bool& is_valid, CryptoKey& session_key)
+				     bool& is_valid, CryptoKey& session_key,
+				     std::unique_ptr<AuthAuthorizerChallenge> *challenge)
 {
   Mutex::Locker l(mds_lock);
   if (stopping) {
@@ -1320,8 +1323,16 @@ bool MDSDaemon::ms_verify_authorizer(Connection *con, int peer_type,
   EntityName name;
   uint64_t global_id;
 
-  is_valid = authorize_handler->verify_authorizer(cct, monc->rotating_secrets,
-						  authorizer_data, authorizer_reply, name, global_id, caps_info, session_key);
+  RotatingKeyRing *keys = monc->rotating_secrets;
+  if (keys) {
+    is_valid = authorize_handler->verify_authorizer(
+      cct, keys,
+      authorizer_data, authorizer_reply, name, global_id, caps_info,
+      session_key, nullptr, challenge);
+  } else {
+    dout(10) << __func__ << " no rotating_keys (yet), denied" << dendl;
+    is_valid = false;
+  }
 
   if (is_valid) {
     entity_name_t n(con->get_peer_type(), global_id);

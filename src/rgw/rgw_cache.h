@@ -49,16 +49,17 @@ struct ObjectMetaInfo {
 WRITE_CLASS_ENCODER(ObjectMetaInfo)
 
 struct ObjectCacheInfo {
-  int status;
-  uint32_t flags;
-  uint64_t epoch;
+  int status = 0;
+  uint32_t flags = 0;
+  uint64_t epoch = 0;
   bufferlist data;
   map<string, bufferlist> xattrs;
   map<string, bufferlist> rm_xattrs;
   ObjectMetaInfo meta;
-  obj_version version;
+  obj_version version = {};
+  ceph::mono_time time_added = ceph::mono_clock::now();
 
-  ObjectCacheInfo() : status(0), flags(0), epoch(0), version() {}
+  ObjectCacheInfo() = default;
 
   void encode(bufferlist& bl) const {
     ENCODE_START(5, 3, bl);
@@ -146,9 +147,11 @@ class ObjectCache {
   list<RGWChainedCache *> chained_cache;
 
   bool enabled;
+  ceph::timespan expiry;
 
   void touch_lru(string& name, ObjectCacheEntry& entry, std::list<string>::iterator& lru_iter);
   void remove_lru(string& name, std::list<string>::iterator& lru_iter);
+  void invalidate_lru(ObjectCacheEntry& entry);
 
   void do_invalidate_all();
 public:
@@ -159,6 +162,7 @@ public:
   void set_ctx(CephContext *_cct) {
     cct = _cct;
     lru_window = cct->_conf->rgw_cache_lru_size / 2;
+    expiry = std::chrono::seconds(cct->_conf->rgw_cache_expiry_interval);
   }
   bool chain_cache_entry(list<rgw_cache_entry_info *>& cache_info_entries, RGWChainedCache::Entry *chained_entry);
 
@@ -233,13 +237,15 @@ public:
               bufferlist& data,
               RGWObjVersionTracker *objv_tracker,
               real_time set_mtime);
-  int put_system_obj_data(void *ctx, rgw_obj& obj, bufferlist& bl, off_t ofs, bool exclusive);
+  int put_system_obj_data(void *ctx, rgw_obj& obj, bufferlist& bl, off_t ofs, bool exclusive,
+                          RGWObjVersionTracker *objv_tracker = nullptr);
 
   int get_system_obj(RGWObjectCtx& obj_ctx, RGWRados::SystemObject::Read::GetObjState& read_state,
                      RGWObjVersionTracker *objv_tracker, rgw_obj& obj,
                      bufferlist& bl, off_t ofs, off_t end,
                      map<string, bufferlist> *attrs,
-                     rgw_cache_entry_info *cache_info);
+                     rgw_cache_entry_info *cache_info,
+		     boost::optional<obj_version> refresh_version = boost::none) override;
 
   int raw_obj_stat(rgw_obj& obj, uint64_t *psize, real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
                    bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
@@ -284,7 +290,8 @@ int RGWCache<T>::get_system_obj(RGWObjectCtx& obj_ctx, RGWRados::SystemObject::R
                      RGWObjVersionTracker *objv_tracker, rgw_obj& obj,
                      bufferlist& obl, off_t ofs, off_t end,
                      map<string, bufferlist> *attrs,
-                     rgw_cache_entry_info *cache_info)
+		     rgw_cache_entry_info *cache_info,
+		     boost::optional<obj_version> refresh_version)
 {
   rgw_bucket bucket;
   string oid;
@@ -301,8 +308,9 @@ int RGWCache<T>::get_system_obj(RGWObjectCtx& obj_ctx, RGWRados::SystemObject::R
     flags |= CACHE_FLAG_OBJV;
   if (attrs)
     flags |= CACHE_FLAG_XATTRS;
-  
-  if (cache.get(name, info, flags, cache_info) == 0) {
+
+  if ((cache.get(name, info, flags, cache_info) == 0) &&
+      (!refresh_version || !info.version.compare(&(*refresh_version)))) {
     if (info.status < 0)
       return info.status;
 
@@ -425,7 +433,8 @@ int RGWCache<T>::put_system_obj_impl(rgw_obj& obj, uint64_t size, real_time *mti
 }
 
 template <class T>
-int RGWCache<T>::put_system_obj_data(void *ctx, rgw_obj& obj, bufferlist& data, off_t ofs, bool exclusive)
+int RGWCache<T>::put_system_obj_data(void *ctx, rgw_obj& obj, bufferlist& data, off_t ofs, bool exclusive,
+                                     RGWObjVersionTracker *objv_tracker)
 {
   rgw_bucket bucket;
   string oid;
@@ -439,7 +448,11 @@ int RGWCache<T>::put_system_obj_data(void *ctx, rgw_obj& obj, bufferlist& data, 
     info.status = 0;
     info.flags = CACHE_FLAG_DATA;
   }
-  int ret = T::put_system_obj_data(ctx, obj, data, ofs, exclusive);
+  if (objv_tracker) {
+    info.version = objv_tracker->write_version;
+    info.flags |= CACHE_FLAG_OBJV;
+  }
+  int ret = T::put_system_obj_data(ctx, obj, data, ofs, exclusive, objv_tracker);
   if (cacheable) {
     string name = normal_name(bucket, oid);
     if (ret >= 0) {

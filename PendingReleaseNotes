@@ -1,3 +1,34 @@
 * The 'mon_warn_osd_usage_min_max_delta' health warning has been disabled because
   it does not address clusters undergoing recovery or CRUSH rules that do
   not target all devices in the cluster.
+
+* The OSDs now avoid starting new scrubs while recovery is in progress.  To
+  revert to the old behavior (and do not let recovery activity affect the
+  scrub scheduling) you can set the following option::
+
+    osd scrub during recovery = true
+
+
+10.2.11
+-------
+
+* The RBD C API's rbd_discard method and the C++ API's Image::discard method
+  now enforce a maximum length of 2GB. This restriction prevents overflow of
+  the result code.
+
+* New OSDs will now use rocksdb for omap data by default, rather than
+  leveldb. omap is used by RGW bucket indexes and CephFS directories,
+  and when a single leveldb grows to 10s of GB with a high write or
+  delete workload, it can lead to high latency when leveldb's
+  single-threaded compaction cannot keep up. rocksdb supports multiple
+  threads for compaction, which avoids this problem.
+
+* The CephFS client now catches failures to clear dentries during startup
+  and refuses to start as consistency and untrimmable cache issues may
+  develop. The new option client_die_on_failed_dentry_invalidate (default:
+  true) may be turned off to allow the client to proceed (dangerous!).
+
+* In 10.2.10 and earlier releases, keyring caps were not checked for validity,
+  so the caps string could be anything. As of 10.2.11, caps strings are
+  validated and providing a keyring with an invalid caps string to, e.g.,
+  "ceph auth add" will result in an error.

@@ -121,6 +121,8 @@ check_SCRIPTS += \
        test/mon/test_pool_quota.sh \
 	test/osd/osd-scrub-repair.sh \
 	test/osd/osd-scrub-snaps.sh \
+	test/osd/osd-scrub-test.sh \
+	test/osd/osd-recovery-scrub.sh \
 	test/osd/osd-config.sh \
 	test/osd/osd-reuse-id.sh \
 	test/osd/osd-bench.sh \
@@ -130,7 +132,6 @@ check_SCRIPTS += \
 	test/mon/mon-handle-forward.sh \
 	test/libradosstriper/rados-striper.sh \
 	test/test_objectstore_memstore.sh \
-        test/test_pidfile.sh \
 	test/test_subman.sh
 
 EXTRA_DIST += \

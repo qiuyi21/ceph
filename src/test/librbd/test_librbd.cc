@@ -793,6 +793,8 @@ TEST_F(TestLibRBD, TestCopy)
   rados_ioctx_create(_cluster, create_pool(true).c_str(), &ioctx);
 
   rbd_image_t image;
+  rbd_image_t image2;
+  rbd_image_t image3;
   int order = 0;
   std::string name = get_temp_image_name();
   std::string name2 = get_temp_image_name();
@@ -803,13 +805,69 @@ TEST_F(TestLibRBD, TestCopy)
   ASSERT_EQ(0, create_image(ioctx, name.c_str(), size, &order));
   ASSERT_EQ(0, rbd_open(ioctx, name.c_str(), &image, NULL));
   ASSERT_EQ(1, test_ls(ioctx, 1, name.c_str()));
+
+  size_t sum_key_len = 0;
+  size_t sum_value_len = 0;
+  std::string key;
+  std::string val;
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_set(image, key.c_str(), val.c_str()));
+
+    sum_key_len += (key.size() + 1);
+    sum_value_len += (val.size() + 1);
+  }
+
+  char keys[1024];
+  char vals[1024];
+  size_t keys_len = sizeof(keys);
+  size_t vals_len = sizeof(vals);
+
+  char value[1024];
+  size_t value_len = sizeof(value);
+
   ASSERT_EQ(0, rbd_copy(image, ioctx, name2.c_str()));
   ASSERT_EQ(2, test_ls(ioctx, 2, name.c_str(), name2.c_str()));
+  ASSERT_EQ(0, rbd_open(ioctx, name2.c_str(), &image2, NULL));
+  ASSERT_EQ(0, rbd_metadata_list(image2, "", 70, keys, &keys_len, vals,
+                                 &vals_len));
+  ASSERT_EQ(keys_len, sum_key_len);
+  ASSERT_EQ(vals_len, sum_value_len);
+
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_get(image2, key.c_str(), value, &value_len));
+    ASSERT_STREQ(val.c_str(), value);
+
+    value_len = sizeof(value);
+  }
+
   ASSERT_EQ(0, rbd_copy_with_progress(image, ioctx, name3.c_str(),
 				      print_progress_percent, NULL));
   ASSERT_EQ(3, test_ls(ioctx, 3, name.c_str(), name2.c_str(), name3.c_str()));
 
+  keys_len = sizeof(keys);
+  vals_len = sizeof(vals);
+  ASSERT_EQ(0, rbd_open(ioctx, name3.c_str(), &image3, NULL));
+  ASSERT_EQ(0, rbd_metadata_list(image3, "", 70, keys, &keys_len, vals,
+                                 &vals_len));
+  ASSERT_EQ(keys_len, sum_key_len);
+  ASSERT_EQ(vals_len, sum_value_len);
+
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_get(image3, key.c_str(), value, &value_len));
+    ASSERT_STREQ(val.c_str(), value);
+
+    value_len = sizeof(value);
+  }
+
   ASSERT_EQ(0, rbd_close(image));
+  ASSERT_EQ(0, rbd_close(image2));
+  ASSERT_EQ(0, rbd_close(image3));
   rados_ioctx_destroy(ioctx);
 }
 
@@ -832,6 +890,8 @@ TEST_F(TestLibRBD, TestCopyPP)
   {
     librbd::RBD rbd;
     librbd::Image image;
+    librbd::Image image2;
+    librbd::Image image3;
     int order = 0;
     std::string name = get_temp_image_name();
     std::string name2 = get_temp_image_name();
@@ -841,12 +901,47 @@ TEST_F(TestLibRBD, TestCopyPP)
 
     ASSERT_EQ(0, create_image_pp(rbd, ioctx, name.c_str(), size, &order));
     ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), NULL));
+
+    std::string key;
+    std::string val;
+    for (int i = 1; i <= 70; i++) {
+      key = "key" + stringify(i);
+      val = "value" + stringify(i);
+      ASSERT_EQ(0, image.metadata_set(key, val));
+    }
+
     ASSERT_EQ(1, test_ls_pp(rbd, ioctx, 1, name.c_str()));
     ASSERT_EQ(0, image.copy(ioctx, name2.c_str()));
     ASSERT_EQ(2, test_ls_pp(rbd, ioctx, 2, name.c_str(), name2.c_str()));
+    ASSERT_EQ(0, rbd.open(ioctx, image2, name2.c_str(), NULL));
+
+    map<string, bufferlist> pairs;
+    std::string value;
+    ASSERT_EQ(0, image2.metadata_list("", 70, &pairs));
+    ASSERT_EQ(70U, pairs.size());
+
+    for (int i = 1; i <= 70; i++) {
+      key = "key" + stringify(i);
+      val = "value" + stringify(i);
+      ASSERT_EQ(0, image2.metadata_get(key.c_str(), &value));
+      ASSERT_STREQ(val.c_str(), value.c_str());
+    }
+
     ASSERT_EQ(0, image.copy_with_progress(ioctx, name3.c_str(), pp));
     ASSERT_EQ(3, test_ls_pp(rbd, ioctx, 3, name.c_str(), name2.c_str(),
-			    name3.c_str()));
+                           name3.c_str()));
+    ASSERT_EQ(0, rbd.open(ioctx, image3, name3.c_str(), NULL));
+
+    pairs.clear();
+    ASSERT_EQ(0, image3.metadata_list("", 70, &pairs));
+    ASSERT_EQ(70U, pairs.size());
+
+    for (int i = 1; i <= 70; i++) {
+      key = "key" + stringify(i);
+      val = "value" + stringify(i);
+      ASSERT_EQ(0, image3.metadata_get(key.c_str(), &value));
+      ASSERT_STREQ(val.c_str(), value.c_str());
+    }
   }
 
   ioctx.close();
@@ -1758,6 +1853,28 @@ TEST_F(TestLibRBD, TestClone)
   ASSERT_EQ(-ENOENT, rbd_get_parent_info(parent, NULL, 0, NULL, 0, NULL, 0));
   printf("parent has no parent info\n");
 
+  // create 70 metadatas to verify we can clone all key/value pairs
+  std::string key;
+  std::string val;
+  size_t sum_key_len = 0;
+  size_t sum_value_len = 0;
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_set(parent, key.c_str(), val.c_str()));
+
+    sum_key_len += (key.size() + 1);
+    sum_value_len += (val.size() + 1);
+  }
+
+  char keys[1024];
+  char vals[1024];
+  size_t keys_len = sizeof(keys);
+  size_t vals_len = sizeof(vals);
+
+  char value[1024];
+  size_t value_len = sizeof(value);
+
   // create a snapshot, reopen as the parent we're interested in
   ASSERT_EQ(0, rbd_snap_create(parent, "parent_snap"));
   printf("made snapshot \"parent@parent_snap\"\n");
@@ -1800,6 +1917,22 @@ TEST_F(TestLibRBD, TestClone)
   EXPECT_EQ(cinfo.obj_size, pinfo.obj_size);
   EXPECT_EQ(cinfo.order, pinfo.order);
   printf("sizes and overlaps are good between parent and child\n");
+
+  // check key/value pairs in child image
+  ASSERT_EQ(0, rbd_metadata_list(child, "", 70, keys, &keys_len, vals,
+                                &vals_len));
+  ASSERT_EQ(sum_key_len, keys_len);
+  ASSERT_EQ(sum_value_len, vals_len);
+
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_get(child, key.c_str(), value, &value_len));
+    ASSERT_STREQ(val.c_str(), value);
+
+    value_len = sizeof(value);
+  }
+  printf("child image successfully cloned all image-meta pairs\n");
 
   // sizing down child results in changing overlap and size, not parent size
   ASSERT_EQ(0, rbd_resize(child, 2UL<<20));
@@ -1875,6 +2008,28 @@ TEST_F(TestLibRBD, TestClone2)
   ASSERT_EQ(-ENOENT, rbd_get_parent_info(parent, NULL, 0, NULL, 0, NULL, 0));
   printf("parent has no parent info\n");
 
+  // create 70 metadatas to verify we can clone all key/value pairs
+  std::string key;
+  std::string val;
+  size_t sum_key_len = 0;
+  size_t sum_value_len = 0;
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_set(parent, key.c_str(), val.c_str()));
+
+    sum_key_len += (key.size() + 1);
+    sum_value_len += (val.size() + 1);
+  }
+
+  char keys[1024];
+  char vals[1024];
+  size_t keys_len = sizeof(keys);
+  size_t vals_len = sizeof(vals);
+
+  char value[1024];
+  size_t value_len = sizeof(value);
+
   // create a snapshot, reopen as the parent we're interested in
   ASSERT_EQ(0, rbd_snap_create(parent, "parent_snap"));
   printf("made snapshot \"parent@parent_snap\"\n");
@@ -1898,6 +2053,22 @@ TEST_F(TestLibRBD, TestClone2)
 			 child_name.c_str(), features, &order));
   ASSERT_EQ(0, rbd_open(ioctx, child_name.c_str(), &child, NULL));
   printf("made and opened clone \"child\"\n");
+
+  // check key/value pairs in child image
+  ASSERT_EQ(0, rbd_metadata_list(child, "", 70, keys, &keys_len, vals,
+                                 &vals_len));
+  ASSERT_EQ(sum_key_len, keys_len);
+  ASSERT_EQ(sum_value_len, vals_len);
+
+  for (int i = 1; i <= 70; i++) {
+    key = "key" + stringify(i);
+    val = "value" + stringify(i);
+    ASSERT_EQ(0, rbd_metadata_get(child, key.c_str(), value, &value_len));
+    ASSERT_STREQ(val.c_str(), value);
+
+    value_len = sizeof(value);
+  }
+  printf("child image successfully cloned all image-meta pairs\n");
 
   // write something in
   ASSERT_EQ((ssize_t)strlen(childata), rbd_write(child, 20, strlen(childata), childata));
@@ -2197,9 +2368,10 @@ TEST_F(TestLibRBD, ListChildren)
 
 TEST_F(TestLibRBD, ListChildrenTiered)
 {
-  string pool_name1 = m_pool_name;
+  string pool_name1 = create_pool(true);
   string pool_name2 = create_pool(true);
   string pool_name3 = create_pool(true);
+  ASSERT_NE("", pool_name1);
   ASSERT_NE("", pool_name2);
   ASSERT_NE("", pool_name3);
 
@@ -3242,7 +3414,7 @@ TEST_F(TestLibRBD, RebuildObjectMapViaLockOwner)
 
 TEST_F(TestLibRBD, RenameViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_JOURNALING);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -3274,7 +3446,7 @@ TEST_F(TestLibRBD, RenameViaLockOwner)
 
 TEST_F(TestLibRBD, SnapCreateViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_EXCLUSIVE_LOCK);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -3318,7 +3490,7 @@ TEST_F(TestLibRBD, SnapCreateViaLockOwner)
 
 TEST_F(TestLibRBD, SnapRemoveViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_FAST_DIFF);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -3678,7 +3850,8 @@ TEST_F(TestLibRBD, Metadata)
   ASSERT_STREQ(vals + strlen(vals) + 1, "value2");
 
   ASSERT_EQ(0, rbd_metadata_remove(image1, "key1"));
-  ASSERT_EQ(0, rbd_metadata_remove(image1, "key3"));
+  int r = rbd_metadata_remove(image1, "key3");
+  ASSERT_TRUE(r == 0 || r == -ENOENT);
   value_len = sizeof(value);
   ASSERT_EQ(-ENOENT, rbd_metadata_get(image1, "key3", value, &value_len));
   ASSERT_EQ(0, rbd_metadata_list(image1, "", 0, keys, &keys_len, vals,
@@ -3843,7 +4016,8 @@ TEST_F(TestLibRBD, MetadataPP)
 
   pairs.clear();
   ASSERT_EQ(0, image1.metadata_remove("key1"));
-  ASSERT_EQ(0, image1.metadata_remove("key3"));
+  int r= image1.metadata_remove("key3");
+  ASSERT_TRUE(r == 0 || r == -ENOENT);
   ASSERT_TRUE(image1.metadata_get("key3", &value) < 0);
   ASSERT_EQ(0, image1.metadata_list("", 0, &pairs));
   ASSERT_EQ(1U, pairs.size());

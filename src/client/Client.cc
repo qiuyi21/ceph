@@ -247,7 +247,6 @@ Client::Client(Messenger *m, MonClient *mc)
     getgroups_cb(NULL),
     umask_cb(NULL),
     can_invalidate_dentries(false),
-    require_remount(false),
     async_ino_invalidator(m->cct),
     async_dentry_invalidator(m->cct),
     interrupt_finisher(m->cct),
@@ -3335,8 +3334,10 @@ void Client::check_caps(Inode *in, bool is_delayed)
     return;   // guard if at end of func
 
   if ((revoking & (CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_LAZYIO)) &&
-      (used & CEPH_CAP_FILE_CACHE) && !(used & CEPH_CAP_FILE_BUFFER))
-    _release(in);
+      (used & CEPH_CAP_FILE_CACHE) && !(used & CEPH_CAP_FILE_BUFFER)) {
+    if (_release(in))
+      used &= ~CEPH_CAP_FILE_CACHE;
+  }
 
   if (!in->cap_snaps.empty())
     flush_snaps(in);
@@ -3664,8 +3665,11 @@ void Client::_invalidate_inode_cache(Inode *in)
   ldout(cct, 10) << "_invalidate_inode_cache " << *in << dendl;
 
   // invalidate our userspace inode cache
-  if (cct->_conf->client_oc)
+  if (cct->_conf->client_oc) {
     objectcacher->release_set(&in->oset);
+    if (!objectcacher->set_is_empty(&in->oset))
+      lderr(cct) << "failed to invalidate cache for " << *in << dendl;
+  }
 
   _schedule_invalidate_callback(in, 0, 0);
 }
@@ -3939,6 +3943,32 @@ void Client::remove_session_caps(MetaSession *s)
   sync_cond.Signal();
 }
 
+int Client::_do_remount(void)
+{
+  errno = 0;
+  int r = remount_cb(callback_handle);
+  if (r != 0) {
+    int e = errno;
+    client_t whoami = get_nodeid();
+    if (r == -1) {
+      lderr(cct) <<
+          "failed to remount (to trim kernel dentries): "
+          "errno = " << e << " (" << strerror(e) << ")" << dendl;
+    } else {
+      lderr(cct) <<
+          "failed to remount (to trim kernel dentries): "
+          "return code = " << r << dendl;
+    }
+    bool should_abort = cct->_conf->client_die_on_failed_remount ||
+        cct->_conf->client_die_on_failed_dentry_invalidate;
+    if (should_abort && !unmounting) {
+      lderr(cct) << "failed to remount for kernel dentry trimming; quitting!" << dendl;
+      ceph_abort();
+    }
+  }
+  return r;
+}
+
 class C_Client_Remount : public Context  {
 private:
   Client *client;
@@ -3946,15 +3976,7 @@ public:
   explicit C_Client_Remount(Client *c) : client(c) {}
   void finish(int r) {
     assert (r == 0);
-    r = client->remount_cb(client->callback_handle);
-    if (r != 0) {
-      client_t whoami = client->get_nodeid();
-      lderr(client->cct) << "tried to remount (to trim kernel dentries) and got error "
-			 << r << dendl;
-      if (client->require_remount && !client->unmounting) {
-	assert(0 == "failed to remount for kernel dentry trimming");
-      }
-    }
+    client->_do_remount();
   }
 };
 
@@ -3962,12 +3984,14 @@ void Client::_invalidate_kernel_dcache()
 {
   if (unmounting)
     return;
-  if (can_invalidate_dentries && dentry_invalidate_cb && root->dir) {
-    for (ceph::unordered_map<string, Dentry*>::iterator p = root->dir->dentries.begin();
-	 p != root->dir->dentries.end();
-	 ++p) {
-      if (p->second->inode)
-	_schedule_invalidate_dentry_callback(p->second, false);
+  if (can_invalidate_dentries) {
+    if (dentry_invalidate_cb && root->dir) {
+      for (ceph::unordered_map<string, Dentry*>::iterator p = root->dir->dentries.begin();
+         p != root->dir->dentries.end();
+         ++p) {
+       if (p->second->inode)
+        _schedule_invalidate_dentry_callback(p->second, false);
+      }
     }
   } else if (remount_cb) {
     // Hacky:
@@ -6302,8 +6326,13 @@ int Client::mkdirs(const char *relpath, mode_t mode)
     }
     //make new dir
     r = _mkdir(cur.get(), path[i].c_str(), mode, uid, gid, &next);
+
     //check proper creation/existence
-    if (r < 0) return r;
+    if(-EEXIST == r && i < path.depth() - 1) {
+      r = _lookup(cur.get(), path[i].c_str(), CEPH_CAP_AUTH_SHARED, &next, uid, gid);
+    }
+    if (r < 0)
+      return r;
     //move to new dir and continue
     cur.swap(next);
     ldout(cct, 20) << "mkdirs: successfully created directory "
@@ -9335,21 +9364,19 @@ int Client::test_dentry_handling(bool can_invalidate)
   if (can_invalidate_dentries) {
     assert(dentry_invalidate_cb);
     ldout(cct, 1) << "using dentry_invalidate_cb" << dendl;
+    r = 0;
   } else if (remount_cb) {
     ldout(cct, 1) << "using remount_cb" << dendl;
-    int s = remount_cb(callback_handle);
-    if (s) {
-      lderr(cct) << "Failed to invoke remount, needed to ensure kernel dcache consistency"
-		 << dendl;
+    r = _do_remount();
+  }
+  if (r) {
+    bool should_abort = cct->_conf->client_die_on_failed_dentry_invalidate;
+    if (should_abort) {
+      lderr(cct) << "no method to invalidate kernel dentry cache; quitting!" << dendl;
+      ceph_abort();
+    } else {
+      lderr(cct) << "no method to invalidate kernel dentry cache; expect issues!" << dendl;
     }
-    if (cct->_conf->client_die_on_failed_remount) {
-      require_remount = true;
-      r = s;
-    }
-  } else {
-    lderr(cct) << "no method to invalidate kernel dentry cache; expect issues!" << dendl;
-    if (cct->_conf->client_die_on_failed_remount)
-      assert(0);
   }
   return r;
 }
@@ -10934,8 +10961,9 @@ int Client::_rmdir(Inode *dir, const char *name, int uid, int gid)
   if (dir->snapid != CEPH_NOSNAP && dir->snapid != CEPH_SNAPDIR) {
     return -EROFS;
   }
-
-  MetaRequest *req = new MetaRequest(dir->snapid == CEPH_SNAPDIR ? CEPH_MDS_OP_RMSNAP:CEPH_MDS_OP_RMDIR);
+  
+  int op = dir->snapid == CEPH_SNAPDIR ? CEPH_MDS_OP_RMSNAP : CEPH_MDS_OP_RMDIR;
+  MetaRequest *req = new MetaRequest(op);
   filepath path;
   dir->make_nosnap_relative_path(path);
   path.push_dentry(name);
@@ -10951,15 +10979,20 @@ int Client::_rmdir(Inode *dir, const char *name, int uid, int gid)
   int res = get_or_create(dir, name, &de);
   if (res < 0)
     goto fail;
+  if (op == CEPH_MDS_OP_RMDIR) 
+    req->set_dentry(de);
+  else
+    de->get();
+
   res = _lookup(dir, name, 0, &in, uid, gid);
   if (res < 0)
     goto fail;
-  if (req->get_op() == CEPH_MDS_OP_RMDIR) {
+  if (op == CEPH_MDS_OP_RMDIR) {
     req->set_inode(dir);
-    req->set_dentry(de);
     req->set_other_inode(in.get());
   } else {
     unlink(de, true, true);
+    de->put();
     req->set_other_inode(in.get());
   }
 
@@ -11257,7 +11290,8 @@ int Client::ll_get_stripe_osd(Inode *in, uint64_t blockno,
 			      file_layout_t* layout)
 {
   Mutex::Locker lock(client_lock);
-  inodeno_t ino = ll_get_inodeno(in);
+
+  inodeno_t ino = in->ino;
   uint32_t object_size = layout->object_size;
   uint32_t su = layout->stripe_unit;
   uint32_t stripe_count = layout->stripe_count;

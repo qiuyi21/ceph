@@ -885,11 +885,16 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     CephContext *cct = ictx->cct;
     ldout(cct, 20) << "children list " << ictx->name << dendl;
 
+    int r = ictx->state->refresh_if_required();
+    if (r < 0) {
+      return r;
+    }
+
     RWLock::RLocker l(ictx->snap_lock);
     parent_spec parent_spec(ictx->md_ctx.get_id(), ictx->id, ictx->snap_id);
     map< pair<int64_t, string>, set<string> > image_info;
 
-    int r = list_children_info(ictx, parent_spec,image_info);
+    r = list_children_info(ictx, parent_spec,image_info);
     if (r < 0) {
       return r;
     }
@@ -920,12 +925,9 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
   }
 
   int list_children_info(ImageCtx *ictx, librbd::parent_spec parent_spec,
-                   map< pair<int64_t, string >, set<string> >& image_info)
+                         map< pair<int64_t, string >, set<string> >& image_info)
   {
     CephContext *cct = ictx->cct;
-    int r = ictx->state->refresh_if_required();
-    if (r < 0)
-      return r;
 
     // no children for non-layered or old format image
     if (!ictx->test_features(RBD_FEATURE_LAYERING, ictx->snap_lock))
@@ -935,7 +937,7 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     // search all pools for children depending on this snapshot
     Rados rados(ictx->md_ctx);
     std::list<std::pair<int64_t, string> > pools;
-    r = rados.pool_list2(pools);
+    int r = rados.pool_list2(pools);
     if (r < 0) {
       lderr(cct) << "error listing pools: " << cpp_strerror(r) << dendl; 
       return r;
@@ -1529,6 +1531,8 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     int partial_r;
     librbd::NoOpProgressContext no_op;
     ImageCtx *c_imctx = NULL;
+    std::string last_metadata_key;
+    const size_t max_metadata_keys = 64;
     map<string, bufferlist> pairs;
     parent_spec pspec(p_imctx->md_ctx.get_id(), p_imctx->id, p_imctx->snap_id);
 
@@ -1622,17 +1626,27 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
       goto err_remove_child;
     }
 
-    r = cls_client::metadata_list(&p_imctx->md_ctx, p_imctx->header_oid, "", 0,
-                                  &pairs);
-    if (r < 0 && r != -EOPNOTSUPP && r != -EIO) {
-      lderr(cct) << "couldn't list metadata: " << cpp_strerror(r) << dendl;
-      goto err_remove_child;
-    } else if (r == 0 && !pairs.empty()) {
+    while (true) {
+      r = cls_client::metadata_list(&p_imctx->md_ctx, p_imctx->header_oid,
+                                    last_metadata_key, max_metadata_keys,
+                                    &pairs);
+      if (r == -EOPNOTSUPP || r == -EIO) {
+        break;
+      } else if (r < 0) {
+        lderr(cct) << "couldn't list metadata: " << cpp_strerror(r) << dendl;
+        goto err_remove_child;
+      }
+
       r = cls_client::metadata_set(&c_ioctx, c_imctx->header_oid, pairs);
       if (r < 0) {
         lderr(cct) << "couldn't set metadata: " << cpp_strerror(r) << dendl;
         goto err_remove_child;
       }
+
+      if (pairs.size() < max_metadata_keys) {
+        break;
+      }
+      last_metadata_key = pairs.rbegin()->first;
     }
 
     ldout(cct, 2) << "done." << dendl;
@@ -1666,8 +1680,7 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     ImageCtx *ictx = new ImageCtx(srcname, "", "", io_ctx, false);
     int r = ictx->state->open(false);
     if (r < 0) {
-      lderr(ictx->cct) << "error opening source image: " << cpp_strerror(r)
-		       << dendl;
+      lderr(cct) << "error opening source image: " << cpp_strerror(r) << dendl;
       delete ictx;
       return r;
     }
@@ -2350,8 +2363,8 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
             ictx->owner_lock.get_read();
           }
         } else {
-          r = ictx->operations->prepare_image_update();
-          if (r < 0 || !ictx->exclusive_lock->is_lock_owner()) {
+          r = ictx->operations->prepare_image_update(false);
+          if (r < 0) {
 	    lderr(cct) << "cannot obtain exclusive lock - not removing" << dendl;
 	    ictx->owner_lock.put_read();
 	    ictx->state->close();
@@ -2670,18 +2683,28 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
       return -EINVAL;
     }
     int r;
+    const uint32_t MAX_KEYS = 64;
     map<string, bufferlist> pairs;
+    std::string last_key = "";
+    bool more_results = true;
 
-    r = cls_client::metadata_list(&src->md_ctx, src->header_oid, "", 0, &pairs);
-    if (r < 0 && r != -EOPNOTSUPP && r != -EIO) {
-      lderr(cct) << "couldn't list metadata: " << cpp_strerror(r) << dendl;
-      return r;
-    } else if (r == 0 && !pairs.empty()) {
-      r = cls_client::metadata_set(&dest->md_ctx, dest->header_oid, pairs);
-      if (r < 0) {
-        lderr(cct) << "couldn't set metadata: " << cpp_strerror(r) << dendl;
+    while (more_results) {
+      r = cls_client::metadata_list(&src->md_ctx, src->header_oid, last_key, 0, &pairs);
+      if (r < 0 && r != -EOPNOTSUPP && r != -EIO) {
+        lderr(cct) << "couldn't list metadata: " << cpp_strerror(r) << dendl;
         return r;
+      } else if (r == 0 && !pairs.empty()) {
+        r = cls_client::metadata_set(&dest->md_ctx, dest->header_oid, pairs);
+        if (r < 0) {
+          lderr(cct) << "couldn't set metadata: " << cpp_strerror(r) << dendl;
+          return r;
+        }
+
+        last_key = pairs.rbegin()->first;
       }
+
+      more_results = (pairs.size() == MAX_KEYS);
+      pairs.clear();
     }
 
     RWLock::RLocker owner_lock(src->owner_lock);
@@ -3037,7 +3060,6 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     }
 
     RWLock::RLocker owner_locker(ictx->owner_lock);
-    RWLock::WLocker md_locker(ictx->md_lock);
     r = ictx->invalidate_cache(false);
     ictx->perfcounter->inc(l_librbd_invalidate_cache);
     return r;
@@ -3550,11 +3572,11 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
     int r;
     do {
       std::map<std::string, std::string> mirror_images;
-      r =  cls_client::mirror_image_list(&io_ctx, last_read, max_read,
-                                             &mirror_images);
-      if (r < 0) {
+      r = cls_client::mirror_image_list(&io_ctx, last_read, max_read,
+                                        &mirror_images);
+      if (r < 0 && r != -ENOENT) {
         lderr(cct) << "error listing mirrored image directory: "
-             << cpp_strerror(r) << dendl;
+                   << cpp_strerror(r) << dendl;
         return r;
       }
       for (auto it = mirror_images.begin(); it != mirror_images.end(); ++it) {
@@ -3910,7 +3932,7 @@ int mirror_image_disable_internal(ImageCtx *ictx, bool force,
 
     std::map<cls::rbd::MirrorImageStatusState, int> states_;
     int r = cls_client::mirror_image_status_get_summary(&io_ctx, &states_);
-    if (r < 0) {
+    if (r < 0 && r != -ENOENT) {
       lderr(cct) << "Failed to get mirror status summary: "
                  << cpp_strerror(r) << dendl;
       return r;

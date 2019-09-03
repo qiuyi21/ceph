@@ -1814,6 +1814,7 @@ void CInode::clear_scatter_dirty()
 void CInode::clear_dirty_scattered(int type)
 {
   dout(10) << "clear_dirty_scattered " << type << " on " << *this << dendl;
+  assert(is_dir());
   switch (type) {
   case CEPH_LOCK_IFILE:
     item_dirty_dirfrag_dir.remove_myself();
@@ -2662,10 +2663,24 @@ client_t CInode::calc_ideal_loner()
   return loner;
 }
 
-client_t CInode::choose_ideal_loner()
+bool CInode::choose_ideal_loner()
 {
   want_loner_cap = calc_ideal_loner();
-  return want_loner_cap;
+  int changed = false;
+  if (loner_cap >= 0 && loner_cap != want_loner_cap) {
+    if (!try_drop_loner())
+      return false;
+    changed = true;
+  }
+
+  if (want_loner_cap >= 0) {
+    if (loner_cap < 0) {
+      set_loner_cap(want_loner_cap);
+      changed = true;
+    } else
+      assert(loner_cap == want_loner_cap);
+  }
+  return changed;
 }
 
 bool CInode::try_set_loner()
@@ -2733,9 +2748,8 @@ void CInode::choose_lock_state(SimpleLock *lock, int allissued)
 void CInode::choose_lock_states(int dirty_caps)
 {
   int issued = get_caps_issued() | dirty_caps;
-  if (is_auth() && (issued & (CEPH_CAP_ANY_EXCL|CEPH_CAP_ANY_WR)) &&
-      choose_ideal_loner() >= 0)
-    try_set_loner();
+  if (is_auth() && (issued & (CEPH_CAP_ANY_EXCL|CEPH_CAP_ANY_WR)))
+    choose_ideal_loner();
   choose_lock_state(&filelock, issued);
   choose_lock_state(&nestlock, issued);
   choose_lock_state(&dirfragtreelock, issued);
@@ -3041,7 +3055,7 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
 			     unsigned max_bytes,
 			     int getattr_caps)
 {
-  int client = session->info.inst.name.num();
+  client_t client = session->info.inst.name.num();
   assert(snapid);
   assert(session->connection);
   
@@ -3222,12 +3236,8 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
     if (!no_caps && valid && !cap) {
       // add a new cap
       cap = add_client_cap(client, session, realm);
-      if (is_auth()) {
-	if (choose_ideal_loner() >= 0)
-	  try_set_loner();
-	else if (get_wanted_loner() < 0)
-	  try_drop_loner();
-      }
+      if (is_auth())
+	choose_ideal_loner();
     }
 
     if (!no_caps && valid && cap) {
@@ -4114,7 +4124,7 @@ void CInode::dump(Formatter *f) const
     f->dump_string("pending", ccap_string(it->second->pending()));
     f->dump_string("issued", ccap_string(it->second->issued()));
     f->dump_string("wanted", ccap_string(it->second->wanted()));
-    f->dump_string("last_sent", ccap_string(it->second->get_last_sent()));
+    f->dump_int("last_sent", it->second->get_last_sent());
     f->close_section();
   }
   f->close_section();

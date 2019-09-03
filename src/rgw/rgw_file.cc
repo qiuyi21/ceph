@@ -870,10 +870,6 @@ namespace rgw {
   }
 
   RGWFileHandle::~RGWFileHandle() {
-    /* in the non-delete case, handle may still be in handle table */
-    if (fh_hook.is_linked()) {
-      fs->fh_cache.remove(fh.fh_hk.object, this, FHCache::FLAG_LOCK);
-    }
     /* cond-unref parent */
     if (parent && (! parent->is_root())) {
       /* safe because if parent->unref causes its deletion,
@@ -911,9 +907,11 @@ namespace rgw {
     lsubdout(fs->get_context(), rgw, 17)
       << __func__ << " " << *this
       << dendl;
-    /* remove if still in fh_cache */
+    /* in the non-delete case, handle may still be in handle table */
     if (fh_hook.is_linked()) {
-      fs->fh_cache.remove(fh.fh_hk.object, this, FHCache::FLAG_LOCK);
+      /* in this case, we are being called from a context which holds
+       * the partition lock */
+      fs->fh_cache.remove(fh.fh_hk.object, this, FHCache::FLAG_NONE);
     }
     return true;
   } /* RGWFileHandle::reclaim */
@@ -1065,6 +1063,15 @@ namespace rgw {
       }
     }
 
+    int overlap = 0;
+    if ((static_cast<off_t>(off) < f->write_req->real_ofs) &&
+        ((f->write_req->real_ofs - off) <= len)) {
+      overlap = f->write_req->real_ofs - off;
+      off = f->write_req->real_ofs;
+      buffer = static_cast<char*>(buffer) + overlap;
+      len -= overlap;
+    }
+
     buffer::list bl;
     /* XXXX */
 #if 0
@@ -1101,7 +1108,7 @@ namespace rgw {
       rc = -EIO;
     }
 
-    *bytes_written = (rc == 0) ? len : 0;
+    *bytes_written = (rc == 0) ? (len + overlap) : 0;
     return rc;
   } /* RGWFileHandle::write */
 

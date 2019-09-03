@@ -140,7 +140,7 @@ struct C_aio_notify_Complete : public C_aio_linger_Complete {
   }
 
   virtual void complete(int r) override {
-    // invoked by C_notify_Finish (or C_aio_notify_Ack on failure)
+    // invoked by C_notify_Finish
     lock.Lock();
     finished = true;
     complete_unlock(r);
@@ -177,10 +177,6 @@ struct C_aio_notify_Ack : public Context {
     ldout(cct, 10) << __func__ << " linger op " << oncomplete->linger_op << " "
                    << "acked (" << r << ")" << dendl;
     oncomplete->handle_ack(r);
-    if (r < 0) {
-      // on failure, we won't expect to see a notify_finish callback
-      onfinish->complete(r);
-    }
   }
 };
 
@@ -808,6 +804,7 @@ int librados::IoCtxImpl::aio_read(const object_t oid, AioCompletionImpl *c,
   c->bl.clear();
   c->bl.push_back(buffer::create_static(len, buf));
   c->blp = &c->bl;
+  c->out_buf = buf;
 
   Objecter::Op *o = objecter->prepare_read_op(
     oid, oloc,
@@ -1492,6 +1489,7 @@ int librados::IoCtxImpl::notify(const object_t& oid, bufferlist& bl,
   Context *notify_finish = new C_notify_Finish(client->cct, &notify_finish_cond,
                                                objecter, linger_op, preply_bl,
                                                preply_buf, preply_buf_len);
+  (void) notify_finish;
 
   uint32_t timeout = notify_timeout;
   if (timeout_ms)
@@ -1523,7 +1521,7 @@ int librados::IoCtxImpl::notify(const object_t& oid, bufferlist& bl,
   } else {
     ldout(client->cct, 10) << __func__ << " failed to initiate notify, r = "
 			   << r << dendl;
-    notify_finish->complete(r);
+    notify_finish_cond.wait();
   }
 
   objecter->linger_cancel(linger_op);
@@ -1630,6 +1628,8 @@ void librados::IoCtxImpl::C_aio_Ack::finish(int r)
   c->cond.Signal();
 
   if (r == 0 && c->blp && c->blp->length() > 0) {
+    if (c->out_buf && !c->blp->is_provided_buffer(c->out_buf))
+      c->blp->copy(0, c->blp->length(), c->out_buf);
     c->rval = c->blp->length();
   }
 

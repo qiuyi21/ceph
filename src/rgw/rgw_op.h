@@ -34,6 +34,8 @@
 #include "rgw_acl.h"
 #include "rgw_cors.h"
 #include "rgw_quota.h"
+#include "cls/lock/cls_lock_client.h"
+#include "cls/rgw/cls_rgw_client.h"
 
 #include "include/assert.h"
 
@@ -59,6 +61,7 @@ protected:
   int do_aws4_auth_completion();
 
   virtual int init_quota();
+
 public:
 RGWOp() : s(nullptr), dialect_handler(nullptr), store(nullptr),
     cors_exist(false), op_ret(0) {}
@@ -426,6 +429,7 @@ public:
 
   virtual void send_response() = 0;
   virtual const string name() { return "get_bucket_location"; }
+  virtual RGWOpType get_type() { return RGW_OP_GET_BUCKET_LOCATION; }
   virtual uint32_t op_mask() { return RGW_OP_TYPE_READ; }
 };
 
@@ -1150,6 +1154,27 @@ protected:
   char *data;
   int len;
 
+  struct MPSerializer {
+    librados::IoCtx ioctx;
+    rados::cls::lock::Lock lock;
+    librados::ObjectWriteOperation op;
+    std::string oid;
+    bool locked;
+
+    MPSerializer() : lock("RGWCompleteMultipart"), locked(false)
+      {}
+
+    int try_lock(const std::string& oid, utime_t dur);
+
+    int unlock() {
+      return lock.unlock(&ioctx, oid);
+    }
+
+    void clear_locked() {
+      locked = false;
+    }
+  } serializer;
+
 public:
   RGWCompleteMultipart() {
     data = NULL;
@@ -1162,6 +1187,7 @@ public:
   int verify_permission();
   void pre_exec();
   void execute();
+  void complete();
 
   virtual int get_params() = 0;
   virtual void send_response() = 0;

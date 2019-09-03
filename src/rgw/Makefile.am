@@ -42,6 +42,7 @@ librgw_la_SOURCES = \
 	rgw/rgw_frontend.cc \
 	rgw/rgw_gc.cc \
 	rgw/rgw_http_client.cc \
+	rgw/rgw_http_client_curl.cc \
 	rgw/rgw_json_enc.cc \
 	rgw/rgw_keystone.cc \
 	rgw/rgw_loadgen.cc \
@@ -155,8 +156,8 @@ radosgw_SOURCES = \
 	rgw/rgw_main.cc
 
 radosgw_CFLAGS = -I$(srcdir)/civetweb/include -fPIC -I$(srcdir)/xxHash ${CIVETWEB_INCLUDE} $(SONAME_DEFINES)
-radosgw_LDADD = $(LIBRGW) $(LIBCIVETWEB) $(LIBCIVETWEB_DEPS) $(LIBRGW_DEPS) $(RESOLV_LIBS) \
-	$(CEPH_GLOBAL)
+radosgw_LDADD = $(LIBRGW) $(LIBCIVETWEB) $(LIBCIVETWEB_DEPS) $(LIBRGW_DEPS) \
+	$(RESOLV_LIBS) $(CEPH_GLOBAL) $(LIBTCMALLOC)
 bin_PROGRAMS += radosgw
 
 radosgw_admin_SOURCES = rgw/rgw_admin.cc rgw/rgw_orphan.cc
@@ -227,6 +228,7 @@ noinst_HEADERS += \
 	rgw/rgw_os_lib.h \
 	rgw/rgw_orphan.h \
 	rgw/rgw_http_client.h \
+	rgw/rgw_http_client_curl.h \
 	rgw/rgw_swift.h \
 	rgw/rgw_swift_auth.h \
 	rgw/rgw_quota.h \

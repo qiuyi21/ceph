@@ -64,7 +64,88 @@
 #include "include/str_list.h"
 #include "include/str_map.h"
 
+#include "auth/cephx/CephxKeyServer.h"
+#include "osd/OSDCap.h"
+
 #define dout_subsys ceph_subsys_mon
+
+namespace {
+
+bool is_osd_writable(const OSDCapGrant& grant, const std::string* pool_name) {
+  // Note: this doesn't include support for the application tag match
+  if ((grant.spec.allow & OSD_CAP_W) != 0) {
+    auto& match = grant.match;
+    if (match.is_match_all()) {
+      return true;
+    } else if (pool_name != nullptr && match.auid < 0 &&
+               !match.pool_name.empty() && match.pool_name == *pool_name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool is_unmanaged_snap_op_permitted(CephContext* cct,
+                                    const KeyServer& key_server,
+                                    const EntityName& entity_name,
+                                    const MonCap& mon_caps,
+                                    const std::string* pool_name)
+{
+  typedef std::map<std::string, std::string> CommandArgs;
+
+  if (mon_caps.is_capable(cct, entity_name, "osd",
+                          "osd pool op unmanaged-snap",
+                          (pool_name == nullptr ?
+                            CommandArgs{} /* pool DNE, require unrestricted cap */ :
+                            CommandArgs{{"poolname", *pool_name}}),
+                          false, true, false)) {
+    return true;
+  }
+
+  AuthCapsInfo caps_info;
+  if (!key_server.get_service_caps(entity_name, CEPH_ENTITY_TYPE_OSD,
+                                   caps_info)) {
+    dout(10) << "unable to locate OSD cap data for " << entity_name
+             << " in auth db" << dendl;
+    return false;
+  }
+
+  string caps_str;
+  if (caps_info.caps.length() > 0) {
+    auto p = caps_info.caps.begin();
+    try {
+      decode(caps_str, p);
+    } catch (const buffer::error &err) {
+      derr << "corrupt OSD cap data for " << entity_name << " in auth db"
+           << dendl;
+      return false;
+    }
+  }
+
+  OSDCap osd_cap;
+  if (!osd_cap.parse(caps_str, nullptr)) {
+    dout(10) << "unable to parse OSD cap data for " << entity_name
+             << " in auth db" << dendl;
+    return false;
+  }
+
+  // if the entity has write permissions in one or all pools, permit
+  // usage of unmanaged-snapshots
+  if (osd_cap.allow_all()) {
+    return true;
+  }
+
+  for (auto& grant : osd_cap.grants) {
+    if (is_osd_writable(grant, pool_name)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+} // anonymous namespace
+
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon, osdmap)
 static ostream& _prefix(std::ostream *_dout, Monitor *mon, OSDMap& osdmap) {
@@ -733,7 +814,9 @@ protected:
     int64_t kb = 0, kb_used = 0, kb_avail = 0;
     double util = 0;
     if (get_bucket_utilization(qi.id, &kb, &kb_used, &kb_avail))
-      util = 100.0 * (double)kb_used / (double)kb;
+      if (kb_used && kb)
+        util = 100.0 * (double)kb_used / (double)kb;
+
     double var = 1.0;
     if (average_util)
       var = util / average_util;
@@ -7008,6 +7091,7 @@ done:
     }
 
     bool implicit_ruleset_creation = false;
+    int64_t expected_num_objects = 0;
     string ruleset_name;
     cmd_getval(g_ceph_context, cmdmap, "ruleset", ruleset_name);
     string erasure_code_profile;
@@ -7045,9 +7129,25 @@ done:
 	  ruleset_name = poolstr;
 	}
       }
+      cmd_getval(g_ceph_context, cmdmap, "expected_num_objects",
+                 expected_num_objects, int64_t(0));
     } else {
       //NOTE:for replicated pool,cmd_map will put ruleset_name to erasure_code_profile field
-      ruleset_name = erasure_code_profile;
+      if (erasure_code_profile != "") { // cmd is from CLI
+        if (ruleset_name != "") {
+          string interr;
+          expected_num_objects = strict_strtoll(ruleset_name.c_str(), 10, &interr);
+          if (interr.length()) {
+            ss << "error parsing integer value '" << ruleset_name << "': " << interr;
+            err = -EINVAL;
+            goto reply;
+          }
+        }
+        ruleset_name = erasure_code_profile;
+      } else { // cmd is well-formed
+        cmd_getval(g_ceph_context, cmdmap, "expected_num_objects",
+                   expected_num_objects, int64_t(0));
+      }
     }
 
     if (!implicit_ruleset_creation && ruleset_name != "") {
@@ -7061,8 +7161,6 @@ done:
 	goto reply;
     }
 
-    int64_t expected_num_objects;
-    cmd_getval(g_ceph_context, cmdmap, "expected_num_objects", expected_num_objects, int64_t(0));
     if (expected_num_objects < 0) {
       ss << "'expected_num_objects' must be non-negative";
       err = -EINVAL;
@@ -7797,10 +7895,61 @@ done:
   return true;
 }
 
-bool OSDMonitor::preprocess_pool_op(MonOpRequestRef op) 
+bool OSDMonitor::enforce_pool_op_caps(MonOpRequestRef op)
+{
+  op->mark_osdmon_event(__func__);
+
+  MPoolOp *m = static_cast<MPoolOp*>(op->get_req());
+  MonSession *session = m->get_session();
+  if (!session) {
+    _pool_op_reply(op, -EPERM, osdmap.get_epoch());
+    return true;
+  }
+
+  switch (m->op) {
+  case POOL_OP_CREATE_UNMANAGED_SNAP:
+  case POOL_OP_DELETE_UNMANAGED_SNAP:
+    {
+      const std::string* pool_name = nullptr;
+      const pg_pool_t *pg_pool = osdmap.get_pg_pool(m->pool);
+      if (pg_pool != nullptr) {
+        pool_name = &osdmap.get_pool_name(m->pool);
+      }
+
+      if (!is_unmanaged_snap_op_permitted(g_ceph_context, mon->key_server,
+                                          session->entity_name, session->caps,
+                                          pool_name)) {
+        dout(0) << "got unmanaged-snap pool op from entity with insufficient "
+                << "privileges. message: " << *m  << std::endl
+                << "caps: " << session->caps << dendl;
+        _pool_op_reply(op, -EPERM, osdmap.get_epoch());
+        return true;
+      }
+    }
+    break;
+  default:
+    if (!session->is_capable("osd", MON_CAP_W)) {
+      dout(0) << "got pool op from entity with insufficient privileges. "
+              << "message: " << *m  << std::endl
+              << "caps: " << session->caps << dendl;
+      _pool_op_reply(op, -EPERM, osdmap.get_epoch());
+      return true;
+    }
+    break;
+  }
+
+  return false;
+}
+
+bool OSDMonitor::preprocess_pool_op(MonOpRequestRef op)
 {
   op->mark_osdmon_event(__func__);
   MPoolOp *m = static_cast<MPoolOp*>(op->get_req());
+
+  if (enforce_pool_op_caps(op)) {
+    return true;
+  }
+
   if (m->op == POOL_OP_CREATE)
     return preprocess_pool_op_create(op);
 
@@ -7873,19 +8022,6 @@ bool OSDMonitor::preprocess_pool_op_create(MonOpRequestRef op)
 {
   op->mark_osdmon_event(__func__);
   MPoolOp *m = static_cast<MPoolOp*>(op->get_req());
-  MonSession *session = m->get_session();
-  if (!session) {
-    _pool_op_reply(op, -EPERM, osdmap.get_epoch());
-    return true;
-  }
-  if (!session->is_capable("osd", MON_CAP_W)) {
-    dout(5) << "attempt to create new pool without sufficient auid privileges!"
-	    << "message: " << *m  << std::endl
-	    << "caps: " << session->caps << dendl;
-    _pool_op_reply(op, -EPERM, osdmap.get_epoch());
-    return true;
-  }
-
   int64_t pool = osdmap.lookup_pg_pool_name(m->name.c_str());
   if (pool >= 0) {
     _pool_op_reply(op, 0, osdmap.get_epoch());

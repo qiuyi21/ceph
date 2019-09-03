@@ -561,6 +561,10 @@ void Objecter::_linger_commit(LingerOp *info, int r, bufferlist& outbl)
     info->on_reg_commit->complete(r);
     info->on_reg_commit = NULL;
   }
+  if (r < 0 && info->on_notify_finish) {
+    info->on_notify_finish->complete(r);
+    info->on_notify_finish = nullptr;
+  }
 
   // only tell the user the first time we do this
   info->registered = true;
@@ -1526,8 +1530,14 @@ void Objecter::_check_linger_pool_dne(LingerOp *op, bool *need_unregister)
   }
   if (op->map_dne_bound > 0) {
     if (osdmap->get_epoch() >= op->map_dne_bound) {
+      LingerOp::unique_lock wl{op->watch_lock};
       if (op->on_reg_commit) {
 	op->on_reg_commit->complete(-ENOENT);
+	op->on_reg_commit = nullptr;
+      }
+      if (op->on_notify_finish) {
+        op->on_notify_finish->complete(-ENOENT);
+        op->on_notify_finish = nullptr;
       }
       *need_unregister = true;
     }
@@ -2411,6 +2421,16 @@ int Objecter::op_cancel(ceph_tid_t tid, int r)
   ret = _op_cancel(tid, r);
 
   return ret;
+}
+
+int Objecter::op_cancel(const vector<ceph_tid_t>& tids, int r)
+{
+  unique_lock wl(rwlock);
+  ldout(cct,10) << __func__ << " " << tids << dendl;
+  for (auto tid : tids) {
+    _op_cancel(tid, r);
+  }
+  return 0;
 }
 
 int Objecter::_op_cancel(ceph_tid_t tid, int r)

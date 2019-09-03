@@ -473,8 +473,9 @@ int rgw_bucket_list(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
         CLS_LOG(20, "entry %s[%s] is not valid\n", key.name.c_str(), key.instance.c_str());
         continue;
       }
-
-      if (!op.list_versions && !entry.is_visible()) {
+      
+      // filter out noncurrent versions, delete markers, and initial marker
+      if (!op.list_versions && (!entry.is_visible() || op.start_obj.name == key.name)) {
         CLS_LOG(20, "entry %s[%s] is not visible\n", key.name.c_str(), key.instance.c_str());
         continue;
       }
@@ -1709,7 +1710,7 @@ static int rgw_bucket_unlink_instance(cls_method_context_t hctx, bufferlist *in,
     rgw_bucket_entry_ver ver;
     ver.epoch = (op.olh_epoch ? op.olh_epoch : olh.get_epoch());
 
-    real_time mtime = real_clock::now(); /* mtime has no real meaning in instance removal context */
+    real_time mtime = obj.mtime(); /* mtime has no real meaning in instance removal context */
     ret = log_index_operation(hctx, op.key, CLS_RGW_OP_UNLINK_INSTANCE, op.op_tag,
                               mtime, ver,
                               CLS_RGW_STATE_COMPLETE, header.ver, header.max_marker,
@@ -1982,6 +1983,18 @@ int rgw_dir_suggest_changes(cls_method_context_t hctx, bufferlist *in, bufferlis
         }
         break;
       case CEPH_RGW_UPDATE:
+	if (!cur_disk.exists) {
+	  // this update would only have been sent by the rgw client
+	  // if the rgw_bucket_dir_entry existed, however between that
+	  // check and now the entry has diappeared, so we were likely
+	  // in the midst of a delete op, and we will not recreate the
+	  // entry
+	  CLS_LOG(10,
+		  "CEPH_RGW_UPDATE not applied because rgw_bucket_dir_entry"
+		  " no longer exists\n");
+	  break;
+	}
+
         CLS_LOG(10, "CEPH_RGW_UPDATE name=%s instance=%s total_entries: %" PRId64 " -> %" PRId64 "\n",
                 cur_change.key.name.c_str(), cur_change.key.instance.c_str(), stats.num_entries, stats.num_entries + 1);
         stats.num_entries++;
@@ -2522,7 +2535,7 @@ static int rgw_bi_list_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
 #define MAX_BI_LIST_ENTRIES 1000
   int32_t max = (op.max < MAX_BI_LIST_ENTRIES ? op.max : MAX_BI_LIST_ENTRIES) + 1; /* one extra entry for identifying truncation */
   string start_key = op.marker;
-  int ret = list_plain_entries(hctx, op.name, op.marker, max, &op_ret.entries) + 1; /* one extra entry for identifying truncation */
+  int ret = list_plain_entries(hctx, op.name, op.marker, max, &op_ret.entries);
   if (ret < 0) {
     CLS_LOG(0, "ERROR: %s(): list_plain_entries retured ret=%d", __func__, ret);
     return ret;

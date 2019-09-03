@@ -117,6 +117,8 @@
     replicalog delete          delete replica metadata log entry
     orphans find               init and run search for leaked rados objects (use job-id, pool)
     orphans finish             clean up search for leaked rados objects
+    sync error list            list sync error
+    sync error trim            trim sync error
   options:
      --tenant=<tenant>         tenant name
      --uid=<id>                user id
@@ -189,6 +191,7 @@
                                (NOTE: required to delete a non-empty bucket)
      --sync-stats              option to 'user stats', update user stats with current
                                stats reported by user's buckets indexes
+     --reset-stats             option to 'user stats', reset stats in accordance with user buckets
      --show-log-entries=<flag> enable/disable dump of log entries on log show
      --show-log-sum=<flag>     enable/disable dump of log summation on log show
      --skip-zero-entries       log show only dumps entries that don't have zero value

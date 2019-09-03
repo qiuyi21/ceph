@@ -8,7 +8,7 @@ AC_PREREQ(2.59)
 # VERSION define is not used by the code.  It gets a version string
 # from 'git describe'; see src/ceph_ver.[ch]
 
-AC_INIT([ceph], [10.2.10], [ceph-devel@vger.kernel.org])
+AC_INIT([ceph], [10.2.11], [ceph-devel@vger.kernel.org])
 
 AX_CXX_COMPILE_STDCXX_11(, mandatory)
 
@@ -555,6 +555,18 @@ SONAME_DEFINES="$SONAME_DEFINES -DCRYPTO_LIB=\\"'"'"$LIBCRYPTO_SONAME\\"'"'""
 ])
 AC_SUBST(SONAME_DEFINES)
 
+AS_IF([test "$RADOSGW" = "1"],
+      [AC_MSG_CHECKING(if curl links with openssl)
+      AC_CHECK_PROG(CURL_CONFIG, curl-config, yes)
+      if test x"${CURL_CONFIG}" == x"yes"; then
+         if curl-config --configure | grep with-ssl; then
+            AC_DEFINE([WITH_CURL_OPENSSL], [1], [Define if curl is linked with ssl])
+         fi
+      else
+        AC_MSG_WARN([curl-config not found, radosgw's outbound ssl requests may be unreliable])
+      fi
+])
+
 # fuse?
 AC_ARG_WITH([fuse],
             [AS_HELP_STRING([--without-fuse], [disable FUSE userspace client])],
@@ -734,6 +746,7 @@ if test "x$enable_cephfs_java" = "xyes"; then
 	# Setup output var
 	AC_SUBST(JDK_CPPFLAGS)
 fi
+AM_CONDITIONAL(HAVE_JAVAH, [test -n "$JAVAH"])
 AM_CONDITIONAL(HAVE_JUNIT4, [test "$have_junit4" = "1"])
 
 #

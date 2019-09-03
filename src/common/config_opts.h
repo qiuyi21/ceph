@@ -353,6 +353,9 @@ OPTION(auth_supported, OPT_STR, "")               // deprecated; default value f
 OPTION(cephx_require_signatures, OPT_BOOL, false) //  If true, don't talk to Cephx partners if they don't support message signing; off by default
 OPTION(cephx_cluster_require_signatures, OPT_BOOL, false)
 OPTION(cephx_service_require_signatures, OPT_BOOL, false)
+OPTION(cephx_require_version, OPT_INT, 1)
+OPTION(cephx_cluster_require_version, OPT_INT, 1)
+OPTION(cephx_service_require_version, OPT_INT, 1)
 OPTION(cephx_sign_messages, OPT_BOOL, true)  // Default to signing session messages if supported
 OPTION(auth_mon_ticket_ttl, OPT_DOUBLE, 60*60*12)
 OPTION(auth_service_ticket_ttl, OPT_DOUBLE, 60*60)
@@ -414,8 +417,9 @@ OPTION(fuse_multithreaded, OPT_BOOL, true)
 OPTION(fuse_require_active_mds, OPT_BOOL, true) // if ceph_fuse requires active mds server
 OPTION(fuse_syncfs_on_mksnap, OPT_BOOL, true)
 
-OPTION(client_try_dentry_invalidate, OPT_BOOL, true) // the client should try to use dentry invaldation instead of remounting, on kernels it believes that will work for
-OPTION(client_die_on_failed_remount, OPT_BOOL, true)
+OPTION(client_try_dentry_invalidate, OPT_BOOL, false) // the client should try to use dentry invaldation instead of remounting, on kernels it believes that will work for
+OPTION(client_die_on_failed_remount, OPT_BOOL, false)
+OPTION(client_die_on_failed_dentry_invalidate, OPT_BOOL, true)
 OPTION(client_check_pool_perm, OPT_BOOL, true)
 OPTION(client_use_faked_inos, OPT_BOOL, false)
 OPTION(client_mds_namespace, OPT_INT, -1)
@@ -760,14 +764,14 @@ OPTION(osd_recovery_delay_start, OPT_FLOAT, 0)
 OPTION(osd_recovery_max_active, OPT_INT, 3)
 OPTION(osd_recovery_max_single_start, OPT_INT, 1)
 OPTION(osd_recovery_max_chunk, OPT_U64, 8<<20)  // max size of push chunk
-OPTION(osd_recovery_max_omap_entries_per_chunk, OPT_U64, 64000) // max number of omap entries per chunk; 0 to disable limit
+OPTION(osd_recovery_max_omap_entries_per_chunk, OPT_U64, 8096) // max number of omap entries per chunk; 0 to disable limit
 OPTION(osd_copyfrom_max_chunk, OPT_U64, 8<<20)   // max size of a COPYFROM chunk
 OPTION(osd_push_per_object_cost, OPT_U64, 1000)  // push cost per object
 OPTION(osd_max_push_cost, OPT_U64, 8<<20)  // max size of push message
 OPTION(osd_max_push_objects, OPT_U64, 10)  // max objects in single push op
 OPTION(osd_recovery_forget_lost_objects, OPT_BOOL, false)   // off for now
 OPTION(osd_max_scrubs, OPT_INT, 1)
-OPTION(osd_scrub_during_recovery, OPT_BOOL, true) // Allow new scrubs to start while recovery is active on the OSD
+OPTION(osd_scrub_during_recovery, OPT_BOOL, false) // Allow new scrubs to start while recovery is active on the OSD
 OPTION(osd_scrub_begin_hour, OPT_INT, 0)
 OPTION(osd_scrub_end_hour, OPT_INT, 24)
 OPTION(osd_scrub_load_threshold, OPT_FLOAT, 0.5)
@@ -797,6 +801,7 @@ OPTION(osd_pg_epoch_persisted_max_stale, OPT_U32, 150) // make this < map_cache_
 OPTION(osd_min_pg_log_entries, OPT_U32, 3000)  // number of entries to keep in the pg log when trimming it
 OPTION(osd_max_pg_log_entries, OPT_U32, 10000) // max entries, say when degraded, before we trim
 OPTION(osd_pg_log_trim_min, OPT_U32, 100)
+OPTION(osd_pg_log_trim_max, OPT_U32, 10000)
 OPTION(osd_op_complaint_time, OPT_FLOAT, 30) // how many seconds old makes an op complaint-worthy
 OPTION(osd_command_max_records, OPT_INT, 256)
 OPTION(osd_max_pg_blocked_by, OPT_U32, 16)    // max peer osds to report that are blocking our progress
@@ -857,10 +862,22 @@ OPTION(kinetic_use_ssl, OPT_BOOL, false) // whether to secure kinetic traffic wi
 OPTION(rocksdb_separate_wal_dir, OPT_BOOL, false) // use $path.wal for wal
 OPTION(rocksdb_db_paths, OPT_STR, "")   // path,size( path,size)*
 OPTION(rocksdb_log_to_ceph_log, OPT_BOOL, true)  // log to ceph log
-OPTION(rocksdb_cache_size, OPT_INT, 128*1024*1024)  // default leveldb cache size
+OPTION(rocksdb_cache_size, OPT_U64, 128*1024*1024)  // default rocksdb cache size
 OPTION(rocksdb_block_size, OPT_INT, 4*1024)  // default rocksdb block size
+OPTION(rocksdb_bloom_bits_per_key, OPT_INT, 20) // Number of bits per key for RocksDB's bloom filters
+OPTION(rocksdb_cache_index_and_filter_blocks, OPT_BOOL, true) // Whether to cache indices and filters in block cache
+OPTION(rocksdb_cache_index_and_filter_blocks_with_high_priority, OPT_BOOL, true) // Whether to cache indicies and filters in the block cache with high priority
+OPTION(rocksdb_pin_l0_filter_and_index_blocks_in_cache, OPT_BOOL, true) // Whether to pin Level 0 indices and bloom filters in the block cache
+OPTION(rocksdb_index_type, OPT_STR, "binary_search") // Type of index for SST files: binary_search, hash_search, two_level
+OPTION(rocksdb_partition_filters, OPT_BOOL, false) // (experimental) partition SST index/filters into smaller blocks
+OPTION(rocksdb_metadata_block_size, OPT_INT, 4*1024) // The block size for index partitions (0 = rocksdb default)
+OPTION(rocksdb_perf, OPT_BOOL, false) // Enabling this will have 5-10% impact on performance for the stats collection
+OPTION(rocksdb_collect_compaction_stats, OPT_BOOL, false) //For rocksdb, this behavior will be an overhead of 5%~10%, collected only rocksdb_perf is enabled.
+OPTION(rocksdb_collect_extended_stats, OPT_BOOL, false) //For rocksdb, this behavior will be an overhead of 5%~10%, collected only rocksdb_perf is enabled.
+OPTION(rocksdb_collect_memory_stats, OPT_BOOL, false) //For rocksdb, this behavior will be an overhead of 5%~10%, collected only rocksdb_perf is enabled.
+
 // rocksdb options that will be used for omap(if omap_backend is rocksdb)
-OPTION(filestore_rocksdb_options, OPT_STR, "")
+OPTION(filestore_rocksdb_options, OPT_STR, "max_background_compactions=8;compaction_readahead_size=2097152;compression=kNoCompression")
 // rocksdb options that will be used in monstore
 OPTION(mon_rocksdb_options, OPT_STR, "write_buffer_size=33554432,compression=kNoCompression")
 
@@ -1009,7 +1026,7 @@ OPTION(kstore_onode_map_size, OPT_U64, 1024)
 OPTION(kstore_cache_tails, OPT_BOOL, true)
 OPTION(kstore_default_stripe_size, OPT_INT, 65536)
 
-OPTION(filestore_omap_backend, OPT_STR, "leveldb")
+OPTION(filestore_omap_backend, OPT_STR, "rocksdb")
 
 OPTION(filestore_debug_disable_sharded_check, OPT_BOOL, false)
 
@@ -1123,6 +1140,7 @@ OPTION(filestore_commit_timeout, OPT_FLOAT, 600)
 OPTION(filestore_fiemap_threshold, OPT_INT, 4096)
 OPTION(filestore_merge_threshold, OPT_INT, 10)
 OPTION(filestore_split_multiple, OPT_INT, 2)
+OPTION(filestore_split_rand_factor, OPT_U32, 20) // randomize the split threshold by adding 16 * [0, rand_factor)
 OPTION(filestore_update_to, OPT_INT, 1000)
 OPTION(filestore_blackhole, OPT_BOOL, false)     // drop any new transactions on the floor
 OPTION(filestore_fd_cache_size, OPT_INT, 128)    // FD lru size
@@ -1267,6 +1285,12 @@ OPTION(rgw_override_bucket_index_max_shards, OPT_U32, 0)
  * Represents the maximum AIO pending requests for the bucket index object shards.
  */
 OPTION(rgw_bucket_index_max_aio, OPT_U32, 8)
+
+/**
+ * Number of seconds before entries in the bucket info cache are
+ * assumed stale and re-fetched. Zero is never.
+ */
+OPTION(rgw_cache_expiry_interval, OPT_U64, 900 /* 15 min */)
 
 /**
  * whether or not the quota/gc threads should be started
@@ -1468,6 +1492,7 @@ OPTION(rgw_num_async_rados_threads, OPT_INT, 32) // num of threads to use for as
 OPTION(rgw_md_notify_interval_msec, OPT_INT, 200) // metadata changes notification interval to followers
 OPTION(rgw_run_sync_thread, OPT_BOOL, true) // whether radosgw (not radosgw-admin) spawns the sync thread
 OPTION(rgw_sync_lease_period, OPT_INT, 120) // time in second for lease that rgw takes on a specific log (or log shard)
+OPTION(rgw_sync_log_trim_interval, OPT_INT, 1200) // time in seconds between attempts to trim sync logs
 
 OPTION(rgw_period_push_interval, OPT_DOUBLE, 2) // seconds to wait before retrying "period push"
 OPTION(rgw_period_push_interval_max, OPT_DOUBLE, 30) // maximum interval after exponential backoff
@@ -1486,5 +1511,6 @@ OPTION(throttler_perf_counter, OPT_BOOL, true) // enable/disable throttler perf 
 OPTION(internal_safe_to_start_threads, OPT_BOOL, false)
 
 OPTION(debug_deliberately_leak_memory, OPT_BOOL, false)
+OPTION(debug_asserts_on_shutdown, OPT_BOOL, false)
 
 OPTION(rgw_swift_custom_header, OPT_STR, "") // option to enable swift custom headers
