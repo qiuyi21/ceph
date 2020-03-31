@@ -32,6 +32,7 @@ if [ ! -d "$data" ]; then
 fi
 
 journal="$data/journal"
+F=/usr/lib/ceph/ceph-osd-prestart-ex.sh && [ -x $F ] && . $F
 
 if [ -L "$journal" -a ! -e "$journal" ]; then
     udevadm settle --timeout=5 || :
