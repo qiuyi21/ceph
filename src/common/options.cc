@@ -3318,7 +3318,7 @@ std::vector<Option> get_global_options() {
     .set_description(""),
 
     Option("bluefs_preextend_wal_files", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
-    .set_default(false)
+    .set_default(true)
     .set_description(""),
 
     Option("bluestore_bluefs", Option::TYPE_BOOL, Option::LEVEL_DEV)
