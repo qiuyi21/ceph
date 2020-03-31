@@ -663,6 +663,7 @@ void end_header(struct req_state* s, RGWOp* op, const char *content_type,
 {
   string ctype;
 
+  dump_header(s, "Server", "BingoCloudS3 2.2.0");
   dump_trans_id(s);
 
   if ((!s->is_err()) &&
