@@ -6,6 +6,79 @@ import inspect
 import os
 import sys
 
+import pwd, atexit, fcntl, errno, signal, time
+
+def daemonize():
+    pidFile = "/dev/shm/ceph-rest-api.pid"
+    pidFd = os.open(pidFile, os.O_CREAT | os.O_RDWR, 0644)
+    try: fcntl.flock(pidFd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError as e:
+        if e.errno != errno.EAGAIN: raise
+        sys.stderr.write("service {0} already running\n".format(os.read(pidFd, 100).strip()))
+        os._exit(1)
+
+    pid = os.fork()
+    if pid > 0: os._exit(0)
+    os.setsid()
+    pid = os.fork()
+    if pid > 0: os._exit(0)
+
+    fd = os.open("/dev/null", os.O_RDONLY)
+    os.dup2(fd, 0)
+    os.close(fd)
+
+    outFile = "/var/log/ceph/ceph-rest-api_log"
+    fd = os.open(outFile, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0644)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    os.close(fd)
+
+    os.ftruncate(pidFd, 0)
+    os.write(pidFd, str(os.getpid()))
+    os.fsync(pidFd)
+
+    ismaster = True
+
+    def onexit():
+        if not ismaster: return
+        try: os.unlink(pidFile)
+        except OSError: pass
+
+    atexit.register(onexit)
+
+    pid = 0
+    stopping = [False]
+
+    def sighdler(signum, frame):
+        stopping[0] = True
+        if ismaster and pid > 0:
+            os.kill(pid, signal.SIGTERM)
+            try: os.waitpid(pid, 0)
+            except OSError: pass
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, sighdler)
+
+    if os.getuid() == 0:
+        try: pw_record = pwd.getpwnam("ceph")
+        except KeyError: pw_record = pwd.getpwnam("nobody")
+        os.chown(pidFile, pw_record.pw_uid, pw_record.pw_gid)
+        os.chown(outFile, pw_record.pw_uid, pw_record.pw_gid)
+        os.setgid(pw_record.pw_gid)
+        os.setuid(pw_record.pw_uid)
+
+    while not stopping[0]:
+        pid = os.fork()
+        if pid > 0:
+            try: os.waitpid(pid, 0)
+            except OSError as e:
+                sys.stderr.write("wait child {0} error: {1}\n".format(pid, e))
+            if not stopping[0]: time.sleep(3)
+        else:
+            ismaster = False
+            os.close(pidFd)
+            break
+
 # Make life easier on developers
 
 MYPATH = os.path.abspath(__file__)
@@ -25,6 +98,8 @@ def parse_args():
 # main
 
 parsed_args, rest = parse_args()
+
+if __name__ == "__main__" and "--show_config" not in rest: daemonize()
 
 # import now that env vars are available to imported module
 
